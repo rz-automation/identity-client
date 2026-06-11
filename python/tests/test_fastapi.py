@@ -223,3 +223,14 @@ def test_requires_exactly_one_secret_source():
         IdentitySessions(FakeIdentity())  # neither secret_key nor secret_path
     with pytest.raises(ValueError):
         IdentitySessions(FakeIdentity(), secret_key=_SECRET, secret_path="/tmp/x")
+
+
+def test_construction_does_no_filesystem_io(tmp_path):
+    # A secret_path whose parent dir does not exist yet: constructing the manager
+    # must not touch the filesystem (the dir may only be mounted at runtime).
+    target = tmp_path / "not-created-yet" / "secret"
+    sessions = IdentitySessions(FakeIdentity(), secret_path=target)
+    assert not target.parent.exists()  # no I/O at construction
+    # The key is loaded/created lazily on first use.
+    _ = sessions._serializer
+    assert target.exists()

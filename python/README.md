@@ -12,7 +12,7 @@ and threat model are documented inline in `identity_client/client.py`.
 ## Install
 
 ```
-identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.2.0#subdirectory=python
+identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.2.1#subdirectory=python
 ```
 
 The repo is public, so no credentials or build secrets are needed. Pin to a tag.

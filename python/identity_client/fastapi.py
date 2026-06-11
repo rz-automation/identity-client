@@ -134,7 +134,6 @@ class IdentitySessions:
     ) -> None:
         if (secret_key is None) == (secret_path is None):
             raise ValueError("provide exactly one of secret_key or secret_path")
-        key = secret_key if secret_key is not None else _load_or_create_secret(secret_path)  # type: ignore[arg-type]
         self.client = client
         self.cookie_name = cookie_name
         self.cookie_secure = cookie_secure
@@ -142,7 +141,28 @@ class IdentitySessions:
         self.absolute_lifetime_seconds = absolute_lifetime_seconds
         self.refresh_skew_seconds = refresh_skew_seconds
         self.admin_only = admin_only
-        self._serializer = URLSafeTimedSerializer(key, salt=salt)
+        self._salt = salt
+        self._secret_key = secret_key
+        self._secret_path = secret_path
+        self._serializer_cache: Optional[URLSafeTimedSerializer] = None
+
+    @property
+    def _serializer(self) -> URLSafeTimedSerializer:
+        """Build the signing serializer on first use.
+
+        Lazy on purpose: constructing the manager does no filesystem I/O, so a
+        ``secret_path`` whose directory isn't ready yet (or only mounted at
+        runtime) never breaks import. The key is loaded/created the first time a
+        cookie is signed or read.
+        """
+        if self._serializer_cache is None:
+            key = (
+                self._secret_key
+                if self._secret_key is not None
+                else _load_or_create_secret(self._secret_path)  # type: ignore[arg-type]
+            )
+            self._serializer_cache = URLSafeTimedSerializer(key, salt=self._salt)
+        return self._serializer_cache
 
     # -- cookie read/write --
 

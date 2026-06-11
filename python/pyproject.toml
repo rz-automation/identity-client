@@ -4,13 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "identity-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client and RS256 access-token verifier for the shared identity auth service."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.28",
     "PyJWT[crypto]==2.10.1",
+]
+
+# Optional FastAPI integration (the cookie session + login routes + gate
+# dependencies). Install with: identity-client[fastapi]. Keeps the core
+# dependency-light for consumers that only need token verification.
+[project.optional-dependencies]
+fastapi = [
+    "fastapi>=0.111",
+    "itsdangerous>=2.2",
 ]
 
 [tool.setuptools]

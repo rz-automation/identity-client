@@ -8,6 +8,11 @@ Public API:
     )
 
 Test helpers live in ``identity_client.testing`` (import them only from tests).
+
+A FastAPI integration (cookie session + login routes + gate dependencies) is
+available as an optional extra: install ``identity-client[fastapi]`` then
+``from identity_client.fastapi import IdentitySessions, auth_router, require_user``.
+It is not imported here so the core stays dependency-light.
 """
 
 from .client import (
@@ -20,7 +25,7 @@ from .client import (
     is_admin_claim,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "IdentityClient",

@@ -12,10 +12,12 @@ and threat model are documented inline in `identity_client/client.py`.
 ## Install
 
 ```
-identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.1.0#subdirectory=python
+identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.2.0#subdirectory=python
 ```
 
 The repo is public, so no credentials or build secrets are needed. Pin to a tag.
+For the optional FastAPI integration, add the extra: append `[fastapi]` to the
+package name (`identity-client[fastapi] @ git+...`).
 
 ## Use
 
@@ -51,6 +53,35 @@ except Exception:
 (couldn't reach it / bad response). Both mean deny; they differ only so you can
 log them apart.
 
+## FastAPI integration (optional)
+
+`identity-client[fastapi]` ships the framework glue, so you don't re-implement
+(and risk drifting on) the cookie session, login routes, and gate per app:
+
+```python
+from fastapi import Depends
+from identity_client import IdentityClient, IdentityConfig
+from identity_client.fastapi import IdentitySessions, auth_router, require_user
+
+client = IdentityClient(IdentityConfig(base_url=..., service_credential=...))
+sessions = IdentitySessions(client, secret_path=...)            # signed-cookie session
+app.include_router(auth_router(sessions), prefix="/api/auth")   # /login /logout /session /auth-config
+
+user_required = require_user(sessions)                          # or require_admin(sessions)
+
+@app.get("/api/whoami")
+def whoami(user=Depends(user_required)):
+    return {"id": user.id}   # the global identity user id — key your own per-app data on it
+```
+
+`require_user` admits any signed-in account; `require_admin` requires the
+`is_admin` claim. Pass `admin_only=True` to `IdentitySessions` for an admin
+console: `/login` then refuses non-admins and a demotion ends the session. The
+session refreshes against identity when the access token goes stale and fails
+closed; lifetime is bounded by an idle timeout and an absolute cap, enforced from
+the cookie's own timestamps. Blocking identity calls run in a threadpool. Drive
+the whole flow in tests with `FakeIdentity`.
+
 ## Testing your integration
 
 `identity_client.testing` ships the doubles so you don't re-derive them:
@@ -70,6 +101,7 @@ token = make_token(priv, "k1", extra={"is_admin": True})
 
 ## What this does NOT do
 
-No web-framework glue. Your login route, session cookie, gate, and CSRF are
-yours to write (they are framework-specific). This package is the part you must
-never hand-copy: the verify and the three calls.
+No web-framework glue beyond the optional FastAPI extra above. For other
+frameworks (e.g. Flask) the login route, session cookie, and gate are yours to
+write — they are framework-specific. The core (verify + the three calls) is the
+part you must never hand-copy.

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "identity-client"
+version = "0.1.0"
+description = "Python client and RS256 access-token verifier for the shared identity auth service."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28",
+    "PyJWT[crypto]==2.10.1",
+]
+
+[tool.setuptools]
+packages = ["identity_client"]

@@ -1,0 +1,335 @@
+"""Identity service client + access-token verifier.
+
+This is the canonical Python integration for the shared ``identity`` auth service:
+the one place its three server-to-server calls and its RS256 token verification
+live, so consumers depend on it instead of copy-pasting security-critical code.
+It lives in the identity repo (``clients/python``) on purpose, next to the
+token-signing code it must stay in lockstep with.
+
+Self-contained: depends only on ``requests``, ``PyJWT`` (with the ``cryptography``
+backend), and the stdlib. No web framework. Wire it to your own framework's
+session layer separately (see the README).
+
+Two responsibilities, kept apart:
+
+  * ``IdentityClient`` -- the three server-to-server auth calls
+    (``/auth/google``, ``/auth/refresh``, ``/auth/logout``), authenticated with
+    this service's ``<service-id>.<secret>`` credential, plus Google-client-id
+    discovery.
+  * ``AccessTokenVerifier`` -- RS256-pinned JWKS verification of the access JWT.
+
+Security invariants -- do NOT weaken:
+
+  * Verify EVERY access token, fully and unconditionally. Pin
+    ``algorithms=["RS256"]``; never read the algorithm from the token header;
+    reject ``none`` and every HMAC alg. (identity publishes its RSA *public* key
+    at the JWKS endpoint, so an HMAC-accepting verifier could be handed a token
+    HMAC-signed with that public key -- the classic alg-confusion forgery.)
+  * Check signature, ``exp``, ``iss == "identity"``, and ``aud == this service's
+    id``. The ``aud`` check is what stops a token identity minted for another
+    service being replayed here.
+  * Bound the JWKS cache with a TTL (so a revoked key stops being trusted within
+    that window) and rate-limit refetches triggered by an unknown ``kid`` (so a
+    stream of random-kid tokens cannot be turned into a fetch-amplification DoS
+    against identity).
+
+Both auth-failure exceptions below mean the same thing to a caller: deny. They
+are distinguished only so the caller may log/measure them differently.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+import jwt
+import requests
+from jwt.algorithms import RSAAlgorithm
+
+
+# --- exceptions --------------------------------------------------------------
+
+
+class IdentityError(Exception):
+    """Base: any identity interaction the caller must treat as auth failure."""
+
+
+class AuthRejected(IdentityError):
+    """identity positively rejected the credential or token (HTTP 401, or a
+    token that failed verification). The subject is not (or no longer) a valid,
+    authorised user."""
+
+
+class IdentityUnavailable(IdentityError):
+    """identity could not be reached or answered with a non-auth error
+    (timeout, connection error, 5xx, malformed body). Per the fail-closed rule
+    this still denies access, but it is *not* a statement about the user."""
+
+
+# --- config ------------------------------------------------------------------
+
+
+@dataclass
+class IdentityConfig:
+    """Everything a consumer needs to talk to identity.
+
+    ``service_id`` (the expected JWT ``aud``) is derived from the credential:
+    identity issues the credential as ``<service-id>.<secret>`` and mints the
+    access JWT with ``aud == str(<service-id>)``, so they are the same value.
+    """
+
+    base_url: str
+    service_credential: str
+    issuer: str = "identity"
+    request_timeout: float = 5.0
+    # JWKS cache controls (see module docstring).
+    jwks_cache_ttl: float = 600.0
+    jwks_min_refetch_interval: float = 60.0
+    service_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.base_url = self.base_url.rstrip("/")
+        if "." not in self.service_credential:
+            raise ValueError(
+                "service_credential must be of the form '<service-id>.<secret>'"
+            )
+        # The secret is url-safe base64 (no dots), so the first dot splits id
+        # from secret cleanly.
+        self.service_id = self.service_credential.split(".", 1)[0]
+        if not self.service_id:
+            raise ValueError("service_credential has an empty service id")
+
+    @property
+    def jwks_url(self) -> str:
+        return f"{self.base_url}/.well-known/jwks.json"
+
+    @property
+    def _auth_header(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.service_credential}"}
+
+
+# --- access-token verification ----------------------------------------------
+
+
+class AccessTokenVerifier:
+    """RS256-pinned verification of identity access tokens against its JWKS.
+
+    Maintains a small in-process cache of signing keys keyed by ``kid``. A new
+    ``kid`` triggers a refetch (rate-limited); the whole cache is refreshed once
+    its TTL lapses so revoked keys age out.
+    """
+
+    def __init__(self, config: IdentityConfig,
+                 session: Optional[requests.Session] = None) -> None:
+        self._config = config
+        self._session = session or requests.Session()
+        self._lock = threading.Lock()
+        self._keys: dict[str, Any] = {}      # kid -> RSA public key object
+        self._fetched_at: float = 0.0        # when _keys was last populated
+        self._last_fetch_attempt: float = 0.0
+
+    # -- public API --
+
+    def verify(self, token: str) -> dict[str, Any]:
+        """Verify *token* and return its claims, or raise.
+
+        Raises ``AuthRejected`` for a token that is malformed, expired, has the
+        wrong ``iss``/``aud``, a bad signature, or a ``kid`` identity does not
+        publish. Raises ``IdentityUnavailable`` only if the JWKS could not be
+        fetched when it had to be.
+        """
+        try:
+            header = jwt.get_unverified_header(token)
+        except jwt.InvalidTokenError as exc:
+            raise AuthRejected(f"malformed token header: {exc}") from exc
+
+        # Pin the algorithm from OUR config, never from the token header.
+        if header.get("alg") != "RS256":
+            raise AuthRejected(f"unexpected alg {header.get('alg')!r}; only RS256")
+        kid = header.get("kid")
+        if not kid:
+            raise AuthRejected("token header has no kid")
+
+        key = self._signing_key(kid)
+        try:
+            claims = jwt.decode(
+                token,
+                key=key,
+                algorithms=["RS256"],          # hard pin; rejects none/HMAC
+                audience=self._config.service_id,
+                issuer=self._config.issuer,
+                options={"require": ["exp", "iss", "aud"]},
+            )
+        except jwt.InvalidTokenError as exc:
+            raise AuthRejected(f"token verification failed: {exc}") from exc
+        return claims
+
+    # -- key cache --
+
+    def _signing_key(self, kid: str):
+        now = time.monotonic()
+        with self._lock:
+            fresh = (now - self._fetched_at) < self._config.jwks_cache_ttl
+            if kid in self._keys and fresh:
+                return self._keys[kid]
+            # Need a (re)fetch: either an unknown kid or a stale cache. Rate-limit
+            # so unknown-kid spam can't amplify into unbounded JWKS fetches.
+            if (now - self._last_fetch_attempt) < self._config.jwks_min_refetch_interval:
+                if kid in self._keys:
+                    return self._keys[kid]            # serve stale rather than refetch
+                raise AuthRejected("unknown kid (refetch rate-limited)")
+            self._last_fetch_attempt = now
+            self._refresh_keys_locked()
+            if kid in self._keys:
+                return self._keys[kid]
+            raise AuthRejected(f"unknown kid {kid!r} after JWKS refresh")
+
+    def _refresh_keys_locked(self) -> None:
+        try:
+            resp = self._session.get(
+                self._config.jwks_url, timeout=self._config.request_timeout
+            )
+            resp.raise_for_status()
+            jwks = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise IdentityUnavailable(f"could not fetch JWKS: {exc}") from exc
+
+        keys: dict[str, Any] = {}
+        for jwk in jwks.get("keys", []):
+            if jwk.get("kty") != "RSA" or "kid" not in jwk:
+                continue
+            try:
+                keys[jwk["kid"]] = RSAAlgorithm.from_jwk(json.dumps(jwk))
+            except (ValueError, KeyError, TypeError):
+                continue                              # skip a malformed entry
+        if keys:
+            self._keys = keys
+            self._fetched_at = time.monotonic()
+
+
+# --- the three auth calls ----------------------------------------------------
+
+
+class IdentityClient:
+    """Server-to-server calls into identity, plus the bundled verifier.
+
+    A consumer creates one of these at startup and uses it for the whole login /
+    refresh / logout lifecycle.
+    """
+
+    def __init__(self, config: IdentityConfig,
+                 session: Optional[requests.Session] = None,
+                 verifier: Optional[AccessTokenVerifier] = None) -> None:
+        self.config = config
+        self._session = session or requests.Session()
+        self.verifier = verifier or AccessTokenVerifier(config, self._session)
+        self._google_cid: Optional[str] = None
+        self._google_cid_at: float = 0.0
+        self._google_cid_ttl: float = 3600.0
+
+    def google_client_id(self) -> Optional[str]:
+        """Discover the shared Google client id from ``/auth-providers``.
+
+        The client id is identity's to own (it verifies the Google token's
+        ``aud`` against its own configured value), so consumers must not hardcode
+        it -- discovering it here makes the two match by construction. Public,
+        unauthenticated, cached ~1h since it rarely changes. Returns None if
+        identity is unreachable and nothing is cached; the login page then cannot
+        render the button, which is correct under hard cutover (no identity, no
+        login).
+        """
+        now = time.monotonic()
+        if self._google_cid is not None and (now - self._google_cid_at) < self._google_cid_ttl:
+            return self._google_cid
+        try:
+            resp = self._session.get(
+                f"{self.config.base_url}/auth-providers",
+                timeout=self.config.request_timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError):
+            return self._google_cid          # serve stale if we have it, else None
+        for provider in data.get("providers", []):
+            if provider.get("id") == "google":
+                self._google_cid = provider.get("client_id")
+                self._google_cid_at = now
+                return self._google_cid
+        return self._google_cid
+
+    def sign_in(self, google_id_token: str) -> dict[str, Any]:
+        """Exchange a relayed Google ID token for tokens (POST /auth/google).
+
+        Returns the identity response body
+        (``access_token``, ``refresh_token``, ``expires_at``, ``user``).
+        """
+        return self._post("/auth/google", {"google_id_token": google_id_token})
+
+    def refresh(self, refresh_token: str) -> dict[str, Any]:
+        """Mint a fresh access token (POST /auth/refresh).
+
+        Returns ``{access_token, expires_at}``. Raises ``AuthRejected`` when the
+        refresh token is invalidated or the user/service is no longer valid
+        (identity answers 401).
+        """
+        return self._post("/auth/refresh", {"refresh_token": refresh_token})
+
+    def logout(self, refresh_token: str) -> None:
+        """Best-effort revoke of *refresh_token* (POST /auth/logout).
+
+        Never raises: logout must always be able to tear the local session down,
+        regardless of whether identity is reachable or the token already gone.
+        """
+        try:
+            self._session.post(
+                f"{self.config.base_url}/auth/logout",
+                headers=self.config._auth_header,
+                json={"refresh_token": refresh_token},
+                timeout=self.config.request_timeout,
+            )
+        except requests.RequestException:
+            pass
+
+    def verify(self, access_token: str) -> dict[str, Any]:
+        """Verify an access token (delegates to the bundled verifier)."""
+        return self.verifier.verify(access_token)
+
+    # -- internals --
+
+    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            resp = self._session.post(
+                f"{self.config.base_url}{path}",
+                headers=self.config._auth_header,
+                json=body,
+                timeout=self.config.request_timeout,
+            )
+        except requests.RequestException as exc:
+            raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
+
+        if resp.status_code == 401:
+            raise AuthRejected(f"identity {path} rejected the request (401)")
+        if resp.status_code >= 400:
+            raise IdentityUnavailable(
+                f"identity {path} returned {resp.status_code}"
+            )
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise IdentityUnavailable(
+                f"identity {path} returned a non-JSON body"
+            ) from exc
+
+
+def is_admin_claim(claims: dict[str, Any]) -> bool:
+    """True iff the verified claims carry ``is_admin`` set to exactly ``True``.
+
+    identity emits ``is_admin`` ONLY when true (it is deliberately absent for
+    non-admins, so a token holder cannot tell the admin tier exists). Gate on the
+    value, not presence, so a future serialization change to a truthy non-bool
+    (a ``1`` or ``"true"``) cannot be mistaken for admin.
+    """
+    return claims.get("is_admin") is True

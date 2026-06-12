@@ -50,6 +50,13 @@ class FakeIdentity:
         self.logout_calls: list[str] = []
         self.sign_in_calls: list[str] = []
         self.refresh_calls: list[str] = []
+        # GDPR-deletion: scripted feed pages + recorded trigger calls.
+        self.deletion_pages: list[dict[str, Any]] = []
+        self.challenge_calls: list[str] = []
+        self.delete_calls: list[tuple[str, str]] = []
+        self.challenge_result: dict[str, Any] = {"nonce": "N", "expires_at": "x"}
+        self.challenge_exc: Optional[Exception] = None
+        self.delete_exc: Optional[Exception] = None
 
     def _claims(self, *, admin: bool) -> dict[str, Any]:
         c = {"sub": self.sub, "email": self.email, "iss": "identity",
@@ -83,6 +90,32 @@ class FakeIdentity:
             admin = self.refresh_admin if self.refresh_admin is not None else self.admin
             return self._claims(admin=admin)
         return self._claims(admin=self.admin)
+
+    # -- GDPR deletion --
+
+    def request_deletion_challenge(self, user_id: str) -> dict[str, Any]:
+        self.challenge_calls.append(user_id)
+        if self.challenge_exc is not None:
+            raise self.challenge_exc
+        return self.challenge_result
+
+    def delete_user(self, user_id: str, google_id_token: str) -> dict[str, Any]:
+        self.delete_calls.append((user_id, google_id_token))
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        return {"deleted": True}
+
+    def fetch_deletions(
+        self, since: int, *, limit: Optional[int] = None, wait: float = 0.0
+    ) -> dict[str, Any]:
+        """Pop the next scripted page, or an empty page advancing the cursor.
+
+        Fill ``deletion_pages`` with ``{"deletions": [...], "cursor": n}`` dicts.
+        When the queue is empty, returns an empty page with the cursor unchanged.
+        """
+        if self.deletion_pages:
+            return self.deletion_pages.pop(0)
+        return {"deletions": [], "cursor": since}
 
 
 # --- real-crypto helpers (for testing the verifier / a real gate) ------------

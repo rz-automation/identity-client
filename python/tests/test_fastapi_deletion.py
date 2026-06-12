@@ -145,7 +145,9 @@ def test_start_and_stop_reconciler_processes_a_page():
     )
 
     async def _drive():
-        handle = start_deletion_reconciler(rec, wait=0.0, retry_backoff=0.01)
+        handle = start_deletion_reconciler(
+            rec, wait=0.0, retry_backoff=0.01, idle_sleep=0.01
+        )
         # Give the loop a few ticks to drain the scripted page.
         for _ in range(50):
             if purged:

@@ -449,6 +449,7 @@ async def run_reconciler(
     *,
     wait: float = 25.0,
     retry_backoff: float = 5.0,
+    idle_sleep: float = 1.0,
     stop: Optional[asyncio.Event] = None,
 ) -> None:
     """Drive a :class:`DeletionReconciler` as one serialized long-poll loop.
@@ -460,20 +461,31 @@ async def run_reconciler(
     periodic floor (a silently dropped connection re-polls within ``wait`` plus
     the client's read margin), so there is no second racing task to coordinate.
 
+    When a poll drains work the loop re-polls immediately (to keep draining); when
+    it returns nothing -- or is blocked on a poison seq -- it pauses ``idle_sleep``
+    first. That pause is what stops a server that returns immediately (``wait``
+    unsupported, or ``wait=0``) from becoming a hot loop, and rate-limits a blocked
+    seq's retries; against a real long-poll the call already consumed ~``wait``
+    seconds, so the pause is negligible.
+
     Run exactly one of these per app (the reconciler is single-writer on the
     cursor). Start it from your app's startup and stop it on shutdown, e.g. via
     :func:`start_deletion_reconciler`.
     """
     while stop is None or not stop.is_set():
         try:
-            await run_in_threadpool(reconciler.reconcile_page, wait)
+            processed = await run_in_threadpool(reconciler.reconcile_page, wait)
         except asyncio.CancelledError:
             raise
         except IdentityError:
             # identity unreachable / 5xx; cursor unchanged, just retry.
             await asyncio.sleep(retry_backoff)
+            continue
         except Exception:  # noqa: BLE001 - the loop must outlive any single error
             await asyncio.sleep(retry_backoff)
+            continue
+        if not processed:
+            await asyncio.sleep(idle_sleep)
 
 
 class ReconcilerHandle:
@@ -495,6 +507,7 @@ def start_deletion_reconciler(
     *,
     wait: float = 25.0,
     retry_backoff: float = 5.0,
+    idle_sleep: float = 1.0,
 ) -> ReconcilerHandle:
     """Start :func:`run_reconciler` as a background task and return its handle.
 
@@ -511,7 +524,13 @@ def start_deletion_reconciler(
     """
     stop = asyncio.Event()
     task = asyncio.create_task(
-        run_reconciler(reconciler, wait=wait, retry_backoff=retry_backoff, stop=stop)
+        run_reconciler(
+            reconciler,
+            wait=wait,
+            retry_backoff=retry_backoff,
+            idle_sleep=idle_sleep,
+            stop=stop,
+        )
     )
     return ReconcilerHandle(task, stop)
 

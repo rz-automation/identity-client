@@ -43,6 +43,8 @@ an async app without stalling the event loop.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import secrets
 import time
@@ -50,13 +52,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .client import AuthRejected, IdentityClient, IdentityError, is_admin_claim
+from .deletions import DeletionReconciler
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
@@ -269,14 +272,26 @@ def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message}, headers=_NO_STORE)
 
 
-def auth_router(sessions: IdentitySessions) -> APIRouter:
+def auth_router(
+    sessions: IdentitySessions,
+    *,
+    on_account_deleted: Optional[Callable[[str], None]] = None,
+) -> APIRouter:
     """Build the login surface (``/auth-config``, ``/login``, ``/logout``,
     ``/session``) for *sessions*. Mount it under any prefix you like::
 
         app.include_router(auth_router(sessions), prefix="/api/auth")
+
+    Pass ``on_account_deleted`` to also expose the self-service GDPR delete flow
+    (``/delete-account/challenge`` and ``/delete-account``). The callback is your
+    app's idempotent local purge for one user id; it runs after identity confirms
+    the global erasure. The feed reconciler re-delivers this app's own user id as a
+    backstop, so the immediate local purge is an optimisation, not a correctness
+    dependency.
     """
     router = APIRouter()
     client = sessions.client
+    user_dep = require_user(sessions)
 
     @router.get("/auth-config")
     async def auth_config() -> JSONResponse:
@@ -326,6 +341,55 @@ def auth_router(sessions: IdentitySessions) -> APIRouter:
         else:
             sessions.clear(out)
         return out
+
+    if on_account_deleted is not None:
+
+        @router.post("/delete-account/challenge")
+        async def delete_account_challenge(
+            response: Response, user: IdentityUser = Depends(user_dep)
+        ) -> Any:
+            """Start the self-service delete: get a re-auth nonce for this user.
+
+            The SPA passes the returned nonce to the provider sign-in to mint a
+            fresh re-auth token, then posts it to ``/delete-account``. Returns
+            ``{already_deleted: True}`` if the account is already gone (skip the
+            re-auth, just tear down locally).
+            """
+            try:
+                result = await run_in_threadpool(
+                    client.request_deletion_challenge, user.id
+                )
+            except AuthRejected:
+                return _error(401, "Re-authentication required.")
+            except IdentityError:
+                return _error(503, "Account service is unavailable. Try again shortly.")
+            response.headers["Cache-Control"] = "no-store"
+            return result
+
+        @router.post("/delete-account")
+        async def delete_account(
+            body: _Credential, user: IdentityUser = Depends(user_dep)
+        ) -> JSONResponse:
+            """Finish the self-service delete: relay the fresh re-auth token.
+
+            On success identity has committed the global erasure; this app purges
+            its own rows immediately and clears the session. A failed re-auth
+            (``401``) leaves everything intact for a retry.
+            """
+            if not body.credential:
+                return _error(400, "No credential received.")
+            try:
+                await run_in_threadpool(client.delete_user, user.id, body.credential)
+            except AuthRejected:
+                return _error(401, "Re-authentication failed.")
+            except IdentityError:
+                return _error(503, "Account service is unavailable. Try again shortly.")
+            # Immediate local purge (optimisation; the feed re-delivers our own id
+            # as the backstop), then clear the session.
+            await run_in_threadpool(on_account_deleted, user.id)
+            out = JSONResponse(content={"ok": True}, headers=_NO_STORE)
+            sessions.clear(out)
+            return out
 
     return router
 
@@ -377,10 +441,88 @@ def require_admin(sessions: IdentitySessions) -> Callable[..., IdentityUser]:
     return dependency
 
 
+# --- deletion-feed reconciler (background task) ------------------------------
+
+
+async def run_reconciler(
+    reconciler: DeletionReconciler,
+    *,
+    wait: float = 25.0,
+    retry_backoff: float = 5.0,
+    stop: Optional[asyncio.Event] = None,
+) -> None:
+    """Drive a :class:`DeletionReconciler` as one serialized long-poll loop.
+
+    Each iteration long-polls the feed (blocking call run in a threadpool) and
+    purges whatever it returns. On a transient identity error it backs off and
+    retries from the unchanged cursor, so nothing is lost. This is a SINGLE
+    serialized loop: the bounded ``wait`` is both the latency mechanism and the
+    periodic floor (a silently dropped connection re-polls within ``wait`` plus
+    the client's read margin), so there is no second racing task to coordinate.
+
+    Run exactly one of these per app (the reconciler is single-writer on the
+    cursor). Start it from your app's startup and stop it on shutdown, e.g. via
+    :func:`start_deletion_reconciler`.
+    """
+    while stop is None or not stop.is_set():
+        try:
+            await run_in_threadpool(reconciler.reconcile_page, wait)
+        except asyncio.CancelledError:
+            raise
+        except IdentityError:
+            # identity unreachable / 5xx; cursor unchanged, just retry.
+            await asyncio.sleep(retry_backoff)
+        except Exception:  # noqa: BLE001 - the loop must outlive any single error
+            await asyncio.sleep(retry_backoff)
+
+
+class ReconcilerHandle:
+    """Handle to a running reconciler loop; ``await handle.stop()`` to end it."""
+
+    def __init__(self, task: "asyncio.Task[None]", stop: asyncio.Event) -> None:
+        self._task = task
+        self._stop = stop
+
+    async def stop(self) -> None:
+        self._stop.set()
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+
+def start_deletion_reconciler(
+    reconciler: DeletionReconciler,
+    *,
+    wait: float = 25.0,
+    retry_backoff: float = 5.0,
+) -> ReconcilerHandle:
+    """Start :func:`run_reconciler` as a background task and return its handle.
+
+    Call from within a running event loop (your app's startup/lifespan). Store the
+    handle and ``await handle.stop()`` on shutdown::
+
+        @asynccontextmanager
+        async def lifespan(app):
+            handle = start_deletion_reconciler(reconciler)
+            try:
+                yield
+            finally:
+                await handle.stop()
+    """
+    stop = asyncio.Event()
+    task = asyncio.create_task(
+        run_reconciler(reconciler, wait=wait, retry_backoff=retry_backoff, stop=stop)
+    )
+    return ReconcilerHandle(task, stop)
+
+
 __all__ = [
     "IdentityUser",
     "IdentitySessions",
     "auth_router",
     "require_user",
     "require_admin",
+    "run_reconciler",
+    "start_deletion_reconciler",
+    "ReconcilerHandle",
 ]

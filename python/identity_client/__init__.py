@@ -24,8 +24,9 @@ from .client import (
     IdentityUnavailable,
     is_admin_claim,
 )
+from .deletions import DeletionReconciler
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 __all__ = [
     "IdentityClient",
@@ -35,4 +36,5 @@ __all__ = [
     "AuthRejected",
     "IdentityUnavailable",
     "is_admin_claim",
+    "DeletionReconciler",
 ]

@@ -207,6 +207,14 @@ def test_google_client_id_discovered_from_auth_providers():
     assert _client(http).google_client_id() == "abc.apps"
 
 
+def test_google_client_id_sends_service_credential():
+    """Discovery carries the service credential so identity can return this
+    service's own client id (per-service Google client, SPEC §9)."""
+    http = FakeHTTP(providers={"providers": [{"id": "google", "client_id": "abc.apps"}]})
+    _client(http).google_client_id()
+    assert http.last_get_headers == {"Authorization": f"Bearer {CREDENTIAL}"}
+
+
 def test_google_client_id_is_cached():
     http = FakeHTTP(providers={"providers": [{"id": "google", "client_id": "abc.apps"}]})
     c = _client(http)

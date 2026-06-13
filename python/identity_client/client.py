@@ -231,12 +231,15 @@ class IdentityClient:
         self._google_cid_ttl: float = 3600.0
 
     def google_client_id(self) -> Optional[str]:
-        """Discover the shared Google client id from ``/auth-providers``.
+        """Discover this service's Google client id from ``/auth-providers``.
 
         The client id is identity's to own (it verifies the Google token's
         ``aud`` against its own configured value), so consumers must not hardcode
-        it -- discovering it here makes the two match by construction. Public,
-        unauthenticated, cached ~1h since it rarely changes. Returns None if
+        it -- discovering it here makes the two match by construction. We send
+        this service's credential so identity returns *this service's* client id
+        if one is configured for it, else identity's global default; the endpoint
+        stays public, so an unauthenticated call still works and yields the
+        global default. Cached ~1h since it rarely changes. Returns None if
         identity is unreachable and nothing is cached; the login page then cannot
         render the button, which is correct under hard cutover (no identity, no
         login).
@@ -247,6 +250,7 @@ class IdentityClient:
         try:
             resp = self._session.get(
                 f"{self.config.base_url}/auth-providers",
+                headers=self.config._auth_header,
                 timeout=self.config.request_timeout,
             )
             resp.raise_for_status()

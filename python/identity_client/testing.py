@@ -177,11 +177,13 @@ class FakeHTTP:
         self._providers = providers
         self._get_exc = get_exc
         self.get_calls = 0
+        self.last_get_headers: Any = None
         self.post_calls: list[tuple] = []
         self._post_queue: list[Any] = []
 
-    def get(self, url, timeout=None):
+    def get(self, url, headers=None, timeout=None):
         self.get_calls += 1
+        self.last_get_headers = headers
         if self._get_exc is not None:
             raise self._get_exc
         if "auth-providers" in url:

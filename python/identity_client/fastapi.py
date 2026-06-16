@@ -130,7 +130,7 @@ class IdentitySessions:
         cookie_name: str = "identity_session",
         cookie_secure: bool = True,
         salt: str = "identity-session",
-        idle_timeout_seconds: int = 12 * 3600,
+        idle_timeout_seconds: Optional[int] = 12 * 3600,
         absolute_lifetime_seconds: int = 7 * _DAY,
         refresh_skew_seconds: int = 30,
         admin_only: bool = False,
@@ -216,8 +216,13 @@ class IdentitySessions:
         now = int(time.time())
         if now - int(data.get("iat", 0)) >= self.absolute_lifetime_seconds:
             return False
-        if now - int(data.get("seen", 0)) >= self.idle_timeout_seconds:
-            return False
+        # idle_timeout_seconds=None opts out of the idle check entirely: the
+        # session then lives until the absolute lifetime or the refresh token
+        # lapses. Suits low-sensitivity consumers where a daily logout is pure
+        # friction; sensitive consumers keep the default.
+        if self.idle_timeout_seconds is not None:
+            if now - int(data.get("seen", 0)) >= self.idle_timeout_seconds:
+                return False
         return True
 
     def _try_refresh(self, data: dict[str, Any]) -> bool:

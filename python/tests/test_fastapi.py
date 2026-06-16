@@ -27,12 +27,18 @@ _GATED_USER = "/protected/user"
 _GATED_ADMIN = "/protected/admin"
 
 
-def _build(identity: FakeIdentity, *, admin_only: bool = False) -> TestClient:
+def _build(
+    identity: FakeIdentity,
+    *,
+    admin_only: bool = False,
+    idle_timeout_seconds=12 * 3600,
+) -> TestClient:
     sessions = IdentitySessions(
         identity,
         secret_key=_SECRET,
         cookie_secure=False,  # TestClient speaks http://
         admin_only=admin_only,
+        idle_timeout_seconds=idle_timeout_seconds,
     )
     app = FastAPI()
     app.include_router(auth_router(sessions), prefix="/api/auth")
@@ -188,6 +194,21 @@ def test_idle_timeout_ends_session():
 
 def test_absolute_lifetime_ends_session():
     client = _build(FakeIdentity())
+    _seed(client, iat=int(time.time()) - 7 * 24 * 3600 - 10)
+    assert client.get(_GATED_USER).status_code == 401
+
+
+def test_idle_timeout_none_keeps_long_idle_session():
+    # Opting out of the idle check: a session untouched for far longer than the
+    # default idle window is still admitted.
+    client = _build(FakeIdentity(), idle_timeout_seconds=None)
+    _seed(client, seen=int(time.time()) - 30 * 24 * 3600)
+    assert client.get(_GATED_USER).status_code == 200
+
+
+def test_idle_timeout_none_still_enforces_absolute_lifetime():
+    # Opting out of idle does not weaken the absolute-lifetime cap.
+    client = _build(FakeIdentity(), idle_timeout_seconds=None)
     _seed(client, iat=int(time.time()) - 7 * 24 * 3600 - 10)
     assert client.get(_GATED_USER).status_code == 401
 

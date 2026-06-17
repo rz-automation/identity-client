@@ -49,7 +49,6 @@ import asyncio
 import contextlib
 import os
 import secrets
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -64,6 +63,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .client import AuthRejected, IdentityClient, IdentityError, is_admin_claim
 from .deletions import DeletionReconciler
+from .sessions import SessionPolicy
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
@@ -152,6 +152,17 @@ class IdentitySessions:
         self._secret_key = secret_key
         self._secret_path = secret_path
         self._serializer_cache: Optional[URLSafeTimedSerializer] = None
+        # The framework-neutral decision core; this class is its cookie/HTTP
+        # adapter. The refresh / fail-closed / bounds logic lives in SessionPolicy
+        # so other bindings (Flask, another language) reuse it instead of
+        # reimplementing it -- see identity_client.sessions.
+        self._policy = SessionPolicy(
+            client,
+            idle_timeout_seconds=idle_timeout_seconds,
+            absolute_lifetime_seconds=absolute_lifetime_seconds,
+            refresh_skew_seconds=refresh_skew_seconds,
+            admin_only=admin_only,
+        )
 
     @property
     def _serializer(self) -> URLSafeTimedSerializer:
@@ -175,16 +186,7 @@ class IdentitySessions:
 
     def new_session(self, claims: dict[str, Any], refresh_token: str) -> dict[str, Any]:
         """Build a fresh session payload from a verified access token's claims."""
-        now = int(time.time())
-        return {
-            "uid": str(claims.get("sub")),
-            "email": claims.get("email"),
-            "rt": refresh_token,
-            "axp": int(claims["exp"]),  # verified access-token expiry
-            "adm": is_admin_claim(claims),
-            "iat": now,  # login time (absolute-lifetime anchor)
-            "seen": now,  # last request time (idle-timeout anchor)
-        }
+        return self._policy.new_session(claims, refresh_token)
 
     def issue(self, response: Response, data: dict[str, Any]) -> None:
         """Write the signed session payload onto the response cookie."""
@@ -214,59 +216,17 @@ class IdentitySessions:
 
     # -- evaluation (the gate) --
 
-    def _in_bounds(self, data: dict[str, Any]) -> bool:
-        if not data.get("rt"):
-            return False
-        now = int(time.time())
-        if now - int(data.get("iat", 0)) >= self.absolute_lifetime_seconds:
-            return False
-        # idle_timeout_seconds=None opts out of the idle check entirely: the
-        # session then lives until the absolute lifetime or the refresh token
-        # lapses. Suits low-sensitivity consumers where a daily logout is pure
-        # friction; sensitive consumers keep the default.
-        if self.idle_timeout_seconds is not None:
-            if now - int(data.get("seen", 0)) >= self.idle_timeout_seconds:
-                return False
-        return True
-
-    def _try_refresh(self, data: dict[str, Any]) -> bool:
-        """Refresh the access token against identity; fail closed.
-
-        Mutates ``data`` (``axp``/``adm``) and returns True only on a verified,
-        unexpired token (and, when ``admin_only``, an ``is_admin`` one). Any other
-        outcome -- a 401, 5xx, timeout, malformed body, or demotion under
-        ``admin_only`` -- returns False so the caller denies the request.
-        """
-        try:
-            resp = self.client.refresh(data["rt"])
-            claims = self.client.verify(resp["access_token"])
-        except (IdentityError, KeyError):
-            return False
-        if self.admin_only and not is_admin_claim(claims):
-            return False
-        exp = claims.get("exp")
-        if not isinstance(exp, (int, float)):
-            return False
-        data["axp"] = int(exp)
-        data["adm"] = is_admin_claim(claims)
-        return True
-
     def evaluate(self, request: Request) -> tuple[bool, Optional[dict[str, Any]]]:
         """Decide whether the request carries a live session.
 
-        Returns ``(authed, data)``. When ``authed`` is True, ``data`` is the
+        Decodes the signed cookie and delegates the decision to the
+        framework-neutral :class:`~identity_client.sessions.SessionPolicy`.
+        Returns ``(authed, data)``: when ``authed`` is True, ``data`` is the
         (possibly refreshed) payload the caller must re-issue so the bumped
         expiry/last-seen persist. Blocking: makes a synchronous identity call
         when refreshing, so async callers run it in a threadpool.
         """
-        data = self.read(request)
-        if data is None or not self._in_bounds(data):
-            return (False, None)
-        if int(time.time()) >= int(data.get("axp", 0)) - self.refresh_skew_seconds:
-            if not self._try_refresh(data):
-                return (False, None)
-        data["seen"] = int(time.time())
-        return (True, data)
+        return self._policy.evaluate(self.read(request))
 
 
 # --- routes ------------------------------------------------------------------

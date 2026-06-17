@@ -49,10 +49,6 @@ non-JSON body means treat as unavailable. Both deny (see §5).
 `{google_id_token: credential}`; `discord` -> `/auth/discord/exchange` with
 `{code: credential}`. Both return the same body.
 
-GDPR endpoints (`/api/v1/users/{id}/delete-challenge`, `/api/v1/users/{id}/delete`,
-`/api/v1/deletions`) are optional for a client to implement; see the Python SDK
-for the reference shapes.
-
 ---
 
 ## 3. Public endpoints (no credential)

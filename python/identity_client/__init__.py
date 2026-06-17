@@ -30,10 +30,9 @@ from .client import (
     IdentityUnavailable,
     is_admin_claim,
 )
-from .deletions import DeletionReconciler
 from .sessions import SessionPolicy
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "IdentityClient",
@@ -43,6 +42,5 @@ __all__ = [
     "AuthRejected",
     "IdentityUnavailable",
     "is_admin_claim",
-    "DeletionReconciler",
     "SessionPolicy",
 ]

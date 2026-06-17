@@ -88,55 +88,6 @@ closed; lifetime is bounded by an idle timeout and an absolute cap, enforced fro
 the cookie's own timestamps. Blocking identity calls run in a threadpool. Drive
 the whole flow in tests with `FakeIdentity`.
 
-## GDPR deletion (optional)
-
-If your app keeps pseudonymous per-user rows keyed on the global user id, erase
-them when the user is deleted at identity. A deleted user never signs in again, so
-you cannot wait for a sign-in to notice — consume the scoped deletion feed instead.
-
-Two halves. **Consume the feed** to purge any user the fleet deletes:
-
-```python
-from identity_client import DeletionReconciler
-from identity_client.fastapi import start_deletion_reconciler
-
-reconciler = DeletionReconciler(
-    client,
-    on_user_deleted=lambda user_id: db.execute(...),   # idempotent DELETE WHERE user_id = ?
-    get_cursor=lambda: store.read_cursor(),             # one integer you persist
-    set_cursor=lambda seq: store.write_cursor(seq),
-)
-
-@asynccontextmanager
-async def lifespan(app):
-    handle = start_deletion_reconciler(reconciler)      # one long-poll loop; single-writer
-    try:
-        yield
-    finally:
-        await handle.stop()
-```
-
-The reconciler long-polls the feed (near-instant), purges ids in `seq` order, and
-advances the cursor only past a successful purge. A failing purge blocks on that
-`seq` (it is not skipped) and is surfaced via the `on_blocked` hook — wire your
-alerting there. Run exactly one instance.
-
-**Offer self-service delete** by passing `on_account_deleted` to `auth_router`,
-which then mounts `/delete-account/challenge` and `/delete-account`:
-
-```python
-app.include_router(
-    auth_router(sessions, on_account_deleted=lambda user_id: db.execute(...)),
-    prefix="/api/auth",
-)
-```
-
-The SPA gets a re-auth nonce from `/delete-account/challenge`, uses it to mint a
-fresh provider token, and posts it to `/delete-account`. On success the account is
-erased fleet-wide; this app purges its own rows immediately and clears the session.
-That immediate purge is an optimisation — the feed re-delivers this app's own user
-id as the backstop, so erasure is guaranteed even if the local purge fails.
-
 ## Testing your integration
 
 `identity_client.testing` ships the doubles so you don't re-derive them:

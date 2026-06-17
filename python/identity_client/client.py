@@ -343,77 +343,7 @@ class IdentityClient:
         """Verify an access token (delegates to the bundled verifier)."""
         return self.verifier.verify(access_token)
 
-    # -- GDPR deletion: trigger + propagation feed --
-
-    def request_deletion_challenge(self, user_id: str) -> dict[str, Any]:
-        """Ask identity for a single-use deletion nonce for *user_id*.
-
-        Step one of the two-step "delete my account" trigger. Returns
-        ``{nonce, expires_at}`` to pass to the browser re-auth, or
-        ``{already_deleted: True}`` if the account is already a tombstone (the
-        caller should then skip the re-auth and just tear down locally). Raises
-        ``AuthRejected`` / ``IdentityUnavailable`` like the other calls.
-        """
-        return self._post(f"/api/v1/users/{user_id}/delete-challenge", {})
-
-    def delete_user(self, user_id: str, google_id_token: str) -> dict[str, Any]:
-        """Trigger global GDPR erasure of *user_id* (step two of the trigger).
-
-        ``google_id_token`` is the freshly minted re-auth token from the browser,
-        carrying the deletion nonce. identity verifies it stricter than sign-in
-        (token bound to the user + matching nonce) before erasing. Returns
-        ``{deleted: True}``. Raises ``AuthRejected`` if the re-auth fails.
-        """
-        return self._post(
-            f"/api/v1/users/{user_id}/delete", {"google_id_token": google_id_token}
-        )
-
-    def fetch_deletions(
-        self, since: int, *, limit: Optional[int] = None, wait: float = 0.0
-    ) -> dict[str, Any]:
-        """Read the scoped deletion feed from cursor *since* (GET /api/v1/deletions).
-
-        Returns ``{deletions: [{user_id, seq, deleted_at}, ...], cursor}``, scoped
-        to this service's users. Persist ``cursor`` (even on an empty page) and
-        pass it as the next ``since`` so the feed never rescans the prefix.
-
-        With ``wait > 0`` this is a **long-poll**: identity holds the request open
-        until a matching deletion lands or ``wait`` elapses, so propagation is
-        near-instant. The read timeout is set above ``wait`` so the connection is
-        not cut off before identity returns; a wait-bounded re-poll is also the
-        periodic floor, so a silently dropped connection still catches up. Raises
-        ``IdentityUnavailable`` on a network/5xx error (the cursor is unchanged, so
-        nothing is lost) and ``AuthRejected`` on a 401.
-        """
-        params: dict[str, Any] = {"since": int(since)}
-        if limit is not None:
-            params["limit"] = int(limit)
-        if wait and wait > 0:
-            params["wait"] = float(wait)
-        # A long-poll must not time out before identity does: give the read a
-        # margin over `wait`. A plain poll (wait=0) uses the normal timeout.
-        timeout = (
-            self.config.request_timeout
-            if not wait
-            else float(wait) + self.config.request_timeout
-        )
-        return self._get("/api/v1/deletions", params=params, timeout=timeout)
-
     # -- internals --
-
-    def _get(
-        self, path: str, params: dict[str, Any], timeout: float
-    ) -> dict[str, Any]:
-        try:
-            resp = self._session.get(
-                f"{self.config.base_url}{path}",
-                headers=self.config._auth_header,
-                params=params,
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
-        return self._parse(resp, path)
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         try:

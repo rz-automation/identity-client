@@ -10,8 +10,11 @@ backend):
 - [`python/`](python/) — Python backend SDK: the server-to-server calls, the
   RS256 access-token verifier, the framework-neutral session state machine
   (`SessionPolicy`), and an optional FastAPI integration. See
-  [`python/README.md`](python/README.md). (Future backend languages, e.g.
-  `kotlin/`, slot in here as siblings.)
+  [`python/README.md`](python/README.md).
+- [`kotlin/`](kotlin/) — Kotlin / JVM backend SDK: the same server-to-server
+  calls, RS256 verifier, and `SessionPolicy`, dependency-light (jjwt +
+  kotlinx-serialization, HTTP via the JDK) so any JVM backend can depend on it.
+  Published via JitPack from a repo tag. See [`kotlin/README.md`](kotlin/README.md).
 - [`web/`](web/) — the browser login module (Google + Discord buttons and flows).
   Framework-agnostic, dependency-free, talks only to the consumer's own backend.
   See [`web/README.md`](web/README.md).

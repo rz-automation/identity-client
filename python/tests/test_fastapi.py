@@ -149,6 +149,62 @@ def test_discord_callback_error_redirects_with_reason():
     assert "error=discord" in r.headers["location"]
 
 
+# --- email+password ----------------------------------------------------------
+
+
+def test_password_signup_establishes_session():
+    identity = FakeIdentity(admin=False)
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/signup",
+        json={"email": "user@example.com", "password": "pw"},
+    )
+    assert r.status_code == 200, r.text
+    assert identity.password_calls == [("signup", "user@example.com", "pw")]
+    assert client.get(_GATED_USER).status_code == 200
+
+
+def test_password_login_establishes_session():
+    identity = FakeIdentity(admin=False)
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/login",
+        json={"email": "user@example.com", "password": "pw"},
+    )
+    assert r.status_code == 200, r.text
+    assert identity.password_calls == [("login", "user@example.com", "pw")]
+    assert client.get(_GATED_USER).status_code == 200
+
+
+def test_password_signup_rejection_passes_status_and_message():
+    from identity_client import PasswordRejected
+
+    identity = FakeIdentity()
+    identity.password_exc = PasswordRejected(409, "Email already in use.")
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/signup",
+        json={"email": "user@example.com", "password": "pw"},
+    )
+    assert r.status_code == 409
+    assert r.json()["error"] == "Email already in use."
+    assert client.get(_GATED_USER).status_code == 401  # no session established
+
+
+def test_password_login_401_is_generic():
+    from identity_client import AuthRejected
+
+    identity = FakeIdentity()
+    identity.password_exc = AuthRejected("nope")
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/login",
+        json={"email": "user@example.com", "password": "bad"},
+    )
+    assert r.status_code == 401
+    assert r.json()["error"] == "Incorrect email or password."
+
+
 # --- user vs admin gate ------------------------------------------------------
 
 

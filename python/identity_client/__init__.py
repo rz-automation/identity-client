@@ -28,11 +28,12 @@ from .client import (
     IdentityConfig,
     IdentityError,
     IdentityUnavailable,
+    PasswordRejected,
     is_admin_claim,
 )
 from .sessions import SessionPolicy
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "IdentityClient",
@@ -41,6 +42,7 @@ __all__ = [
     "IdentityError",
     "AuthRejected",
     "IdentityUnavailable",
+    "PasswordRejected",
     "is_admin_claim",
     "SessionPolicy",
 ]

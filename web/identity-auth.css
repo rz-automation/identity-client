@@ -4,7 +4,8 @@
    styles the Discord link and the layout around it. */
 
 .identity-auth-google,
-.identity-auth-discord {
+.identity-auth-discord,
+.identity-auth-password {
   display: block;
   width: 320px;
   max-width: 100%;
@@ -25,4 +26,53 @@
 
 .identity-auth-discord:hover {
   background: #4752c4;
+}
+
+/* Email + password form. Kept simple and consistent with the Discord button. */
+.identity-auth-password-email,
+.identity-auth-password-password {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  font: 400 15px/1.2 system-ui, sans-serif;
+  box-sizing: border-box;
+}
+
+.identity-auth-password-submit {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 8px;
+  background: #5865f2;
+  color: #fff;
+  font: 500 15px/1.2 system-ui, sans-serif;
+  text-align: center;
+  cursor: pointer;
+}
+
+.identity-auth-password-submit:hover {
+  background: #4752c4;
+}
+
+.identity-auth-password-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.identity-auth-password-toggle {
+  display: block;
+  margin: 8px 0 0;
+  font: 400 13px/1.2 system-ui, sans-serif;
+  color: #5865f2;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.identity-auth-password-toggle:hover {
+  text-decoration: underline;
 }

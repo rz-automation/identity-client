@@ -44,6 +44,12 @@ in identity's admin console and the buttons follow — no front-end change.
   browser, and `onSignedIn` is not used for it (the redirect is the success).
   A Discord failure comes back as `?error=...` on your post-login page, which
   `mountAuth` surfaces through `onError` on its next mount.
+- **Password** (email + password) renders a small in-page form — email and
+  password inputs, a primary button, and a "Create account" toggle that flips
+  the action between login and signup. On submit it POSTs `{ email, password }`
+  same-origin to `{basePath}/password/login` or `{basePath}/password/signup`;
+  `onSignedIn` fires on success, and the server's `{ error }` message is shown
+  via `onError` on failure.
 
 ### Helpers
 

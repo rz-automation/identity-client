@@ -1,0 +1,28 @@
+/* Optional default styling for identity-auth buttons. Import it, or skip it and
+   style .identity-auth-google / .identity-auth-discord yourself. The Google
+   button itself is rendered and styled by Google Identity Services; this only
+   styles the Discord link and the layout around it. */
+
+.identity-auth-google,
+.identity-auth-discord {
+  display: block;
+  width: 320px;
+  max-width: 100%;
+  margin: 0 auto 12px;
+  box-sizing: border-box;
+}
+
+.identity-auth-discord {
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #5865f2; /* Discord blurple */
+  color: #fff;
+  font: 500 15px/1.2 system-ui, sans-serif;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.identity-auth-discord:hover {
+  background: #4752c4;
+}

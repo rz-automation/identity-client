@@ -1,0 +1,23 @@
+{
+  "name": "@rz-automation/identity-auth",
+  "version": "0.6.0",
+  "description": "Shared front-end login buttons for the identity auth service (Google + Discord). Framework-agnostic, dependency-free.",
+  "type": "module",
+  "main": "identity-auth.js",
+  "module": "identity-auth.js",
+  "exports": {
+    ".": "./identity-auth.js"
+  },
+  "files": [
+    "identity-auth.js",
+    "identity-auth.css",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rz-automation/identity-client.git",
+    "directory": "web"
+  }
+}

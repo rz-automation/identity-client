@@ -12,10 +12,11 @@ session layer separately (see the README).
 
 Two responsibilities, kept apart:
 
-  * ``IdentityClient`` -- the three server-to-server auth calls
-    (``/auth/google``, ``/auth/refresh``, ``/auth/logout``), authenticated with
-    this service's ``<service-id>.<secret>`` credential, plus Google-client-id
-    discovery.
+  * ``IdentityClient`` -- the server-to-server auth calls (provider sign-in via
+    ``/auth/google`` or ``/auth/discord/exchange``, plus ``/auth/refresh`` and
+    ``/auth/logout``), authenticated with this service's ``<service-id>.<secret>``
+    credential, plus provider discovery (``providers()`` / ``google_client_id()``
+    / ``discord_start_url()``).
   * ``AccessTokenVerifier`` -- RS256-pinned JWKS verification of the access JWT.
 
 Security invariants -- do NOT weaken:
@@ -226,27 +227,29 @@ class IdentityClient:
         self.config = config
         self._session = session or requests.Session()
         self.verifier = verifier or AccessTokenVerifier(config, self._session)
-        self._google_cid: Optional[str] = None
-        self._google_cid_at: float = 0.0
-        self._google_cid_ttl: float = 3600.0
+        self._providers: Optional[list[dict[str, Any]]] = None
+        self._providers_at: float = 0.0
+        self._providers_ttl: float = 3600.0
 
-    def google_client_id(self) -> Optional[str]:
-        """Discover this service's Google client id from ``/auth-providers``.
+    def providers(self) -> list[dict[str, Any]]:
+        """Discover this service's enabled login providers from ``/auth-providers``.
 
-        The client id is identity's to own (it verifies the Google token's
-        ``aud`` against its own configured value), so consumers must not hardcode
-        it -- discovering it here makes the two match by construction. We send
-        this service's credential so identity returns *this service's* client id
-        if one is configured for it, else identity's global default; the endpoint
-        stays public, so an unauthenticated call still works and yields the
-        global default. Cached ~1h since it rarely changes. Returns None if
-        identity is unreachable and nothing is cached; the login page then cannot
-        render the button, which is correct under hard cutover (no identity, no
-        login).
+        Returns the provider list identity advertises for this service, e.g.
+        ``[{"id": "google", "client_id": ...}, {"id": "discord"}]``. We send this
+        service's credential so identity returns *this service's* configuration
+        (its Google client id, whether Discord is enabled for it); the endpoint
+        stays public, so an unauthenticated call still works and yields identity's
+        own defaults. Cached ~1h since it rarely changes. Returns the stale cache
+        (or ``[]`` if nothing is cached) when identity is unreachable, so the
+        login page degrades to "no buttons" rather than erroring -- correct under
+        hard cutover (no identity, no login).
         """
         now = time.monotonic()
-        if self._google_cid is not None and (now - self._google_cid_at) < self._google_cid_ttl:
-            return self._google_cid
+        if (
+            self._providers is not None
+            and (now - self._providers_at) < self._providers_ttl
+        ):
+            return self._providers
         try:
             resp = self._session.get(
                 f"{self.config.base_url}/auth-providers",
@@ -256,21 +259,60 @@ class IdentityClient:
             resp.raise_for_status()
             data = resp.json()
         except (requests.RequestException, ValueError):
-            return self._google_cid          # serve stale if we have it, else None
-        for provider in data.get("providers", []):
-            if provider.get("id") == "google":
-                self._google_cid = provider.get("client_id")
-                self._google_cid_at = now
-                return self._google_cid
-        return self._google_cid
+            return self._providers or []     # serve stale if we have it, else []
+        provs = data.get("providers", [])
+        if isinstance(provs, list):
+            self._providers = provs
+            self._providers_at = now
+        return self._providers or []
 
-    def sign_in(self, google_id_token: str) -> dict[str, Any]:
-        """Exchange a relayed Google ID token for tokens (POST /auth/google).
+    def google_client_id(self) -> Optional[str]:
+        """This service's Google client id (from ``providers()``), or None.
+
+        identity owns the client id (it verifies the Google token's ``aud``
+        against its own configured value), so consumers must not hardcode it --
+        discovering it here makes the two match by construction. None means either
+        Google is not configured for this service or identity is unreachable with
+        nothing cached; the Google button then cannot render, which is correct.
+        """
+        for provider in self.providers():
+            if provider.get("id") == "google":
+                return provider.get("client_id")
+        return None
+
+    def discord_start_url(self) -> Optional[str]:
+        """Absolute URL that begins Discord sign-in, or None if it's not enabled.
+
+        The browser navigates here at the top level (not a fetch): identity runs
+        the whole Discord OAuth dance server-side and bounces back to this
+        service's registered Discord return URL with a single-use exchange code,
+        which the backend swaps via ``sign_in("discord", code)``. None when
+        Discord is not advertised for this service (or identity is unreachable).
+        """
+        if not any(p.get("id") == "discord" for p in self.providers()):
+            return None
+        return (
+            f"{self.config.base_url}/auth/discord/start"
+            f"?service_id={self.config.service_id}"
+        )
+
+    def sign_in(self, provider: str, credential: str) -> dict[str, Any]:
+        """Exchange a provider credential for identity tokens.
+
+        - ``provider="google"``: *credential* is the relayed Google ID token
+          (POST ``/auth/google``).
+        - ``provider="discord"``: *credential* is the single-use exchange code
+          from the Discord return redirect (POST ``/auth/discord/exchange``).
 
         Returns the identity response body
-        (``access_token``, ``refresh_token``, ``expires_at``, ``user``).
+        (``access_token``, ``refresh_token``, ``expires_at``, ``user``). Raises
+        ``ValueError`` for an unknown provider.
         """
-        return self._post("/auth/google", {"google_id_token": google_id_token})
+        if provider == "google":
+            return self._post("/auth/google", {"google_id_token": credential})
+        if provider == "discord":
+            return self._post("/auth/discord/exchange", {"code": credential})
+        raise ValueError(f"unknown provider {provider!r}")
 
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         """Mint a fresh access token (POST /auth/refresh).

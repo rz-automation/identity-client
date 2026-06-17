@@ -15,10 +15,12 @@ It provides three things:
   enforced from the cookie's own timestamps. When the short-lived access token
   goes stale it refreshes against identity and **fails closed** on any
   uncertainty, so an identity-side disable/delete bites within one refresh cycle.
-* ``auth_router`` -- an ``APIRouter`` exposing ``/auth-config`` (Google client-id
-  discovery), ``/login`` (exchange a relayed Google credential for a session),
-  ``/logout`` (revoke + clear), and ``/session`` (report auth state). Mount it
-  under whatever prefix you like.
+* ``auth_router`` -- an ``APIRouter`` exposing ``/auth-config`` (enabled
+  providers + their public config), ``/login`` (exchange a relayed provider
+  credential -- Google ID token or Discord exchange code -- for a session),
+  ``/discord/callback`` (the browser-facing Discord return target), ``/logout``
+  (revoke + clear), and ``/session`` (report auth state). Mount it under whatever
+  prefix you like.
 * ``require_user`` / ``require_admin`` -- per-route dependencies. ``require_user``
   admits any signed-in identity account; ``require_admin`` additionally requires
   the ``is_admin`` claim. Both re-issue the (refreshed) cookie on the response.
@@ -52,8 +54,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -269,23 +273,45 @@ class IdentitySessions:
 
 
 class _Credential(BaseModel):
-    # The Google ID token the sign-in button hands the SPA, relayed here.
+    # The provider credential relayed from the browser: a Google ID token for
+    # provider="google", or the single-use exchange code for provider="discord".
     credential: str = Field(default="", max_length=4096)
+    provider: str = Field(default="google", max_length=32)
 
 
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message}, headers=_NO_STORE)
 
 
+def _append_query(url: str, params: dict[str, str]) -> str:
+    """Return *url* with *params* merged into its query string."""
+    parts = urlparse(url)
+    query = dict(parse_qsl(parts.query))
+    query.update(params)
+    return urlunparse(parts._replace(query=urlencode(query)))
+
+
 def auth_router(
     sessions: IdentitySessions,
     *,
     on_account_deleted: Optional[Callable[[str], None]] = None,
+    post_login_path: str = "/",
 ) -> APIRouter:
-    """Build the login surface (``/auth-config``, ``/login``, ``/logout``,
-    ``/session``) for *sessions*. Mount it under any prefix you like::
+    """Build the login surface for *sessions*. Mount it under any prefix you like::
 
         app.include_router(auth_router(sessions), prefix="/api/auth")
+
+    Routes:
+      * ``GET  /auth-config`` -- the enabled providers + their public config
+        (Google client id, Discord start URL), for a frontend to render buttons.
+      * ``POST /login`` -- exchange a relayed provider credential (a Google ID
+        token, or a Discord exchange code) for a session.
+      * ``GET  /discord/callback`` -- the browser-facing Discord return target.
+        Register THIS URL (e.g. ``https://app.example/api/auth/discord/callback``)
+        as the service's Discord return URL in identity's admin console. It reads
+        the exchange code, establishes the session, and redirects to
+        ``post_login_path`` (``?error=...`` on failure).
+      * ``POST /logout`` -- revoke + clear. ``GET /session`` -- report auth state.
 
     Pass ``on_account_deleted`` to also expose the self-service GDPR delete flow
     (``/delete-account/challenge`` and ``/delete-account``). The callback is your
@@ -300,17 +326,34 @@ def auth_router(
 
     @router.get("/auth-config")
     async def auth_config() -> JSONResponse:
-        cid = await run_in_threadpool(client.google_client_id)
-        return JSONResponse(content={"google_client_id": cid}, headers=_NO_STORE)
+        provs = await run_in_threadpool(client.providers)
+        out_providers: list[dict[str, Any]] = []
+        for p in provs:
+            if p.get("id") == "discord":
+                start_url = await run_in_threadpool(client.discord_start_url)
+                out_providers.append({"id": "discord", "start_url": start_url})
+            elif p.get("id") == "google":
+                out_providers.append(
+                    {"id": "google", "client_id": p.get("client_id")}
+                )
+        return JSONResponse(
+            content={"providers": out_providers}, headers=_NO_STORE
+        )
+
+    def _establish(claims: dict[str, Any], refresh_token: str, out: Response) -> None:
+        """Write the session cookie for a verified sign-in onto *out*."""
+        sessions.issue(out, sessions.new_session(claims, refresh_token))
 
     @router.post("/login")
     async def login(body: _Credential) -> JSONResponse:
         if not body.credential:
             return _error(400, "No credential received.")
         try:
-            resp = await run_in_threadpool(client.sign_in, body.credential)
+            resp = await run_in_threadpool(
+                client.sign_in, body.provider, body.credential
+            )
             claims = await run_in_threadpool(client.verify, resp["access_token"])
-        except AuthRejected:
+        except (AuthRejected, ValueError):
             return _error(401, "Sign-in was rejected.")
         except (IdentityError, KeyError):
             return _error(503, "Sign-in service is unavailable. Try again shortly.")
@@ -325,7 +368,48 @@ def auth_router(
             return _error(503, "Sign-in returned an unexpected response.")
 
         out = JSONResponse(content={"ok": True}, headers=_NO_STORE)
-        sessions.issue(out, sessions.new_session(claims, resp["refresh_token"]))
+        _establish(claims, resp["refresh_token"], out)
+        return out
+
+    @router.get("/discord/callback")
+    async def discord_callback(
+        code: str = "", error: Optional[str] = None
+    ) -> RedirectResponse:
+        """Browser-facing Discord return target (register as the service's URL).
+
+        identity bounces the browser here with ``?code=`` after a successful
+        Discord login (or ``?error=`` on denial). We swap the code for a session
+        and redirect to ``post_login_path``; on any failure we redirect there with
+        ``?error=...`` so the SPA can show a message. A redirect (not JSON) because
+        this is a top-level navigation, not a fetch.
+        """
+        def _fail(reason: str) -> RedirectResponse:
+            return RedirectResponse(
+                _append_query(post_login_path, {"error": reason}),
+                status_code=303,
+                headers=_NO_STORE,
+            )
+
+        if error or not code:
+            return _fail("discord")
+        try:
+            resp = await run_in_threadpool(client.sign_in, "discord", code)
+            claims = await run_in_threadpool(client.verify, resp["access_token"])
+        except AuthRejected:
+            return _fail("rejected")
+        except (IdentityError, KeyError):
+            return _fail("unavailable")
+
+        if sessions.admin_only and not is_admin_claim(claims):
+            await run_in_threadpool(client.logout, resp.get("refresh_token", ""))
+            return _fail("forbidden")
+        if not isinstance(claims.get("exp"), (int, float)) or not claims.get("sub"):
+            return _fail("unexpected")
+
+        out = RedirectResponse(
+            post_login_path, status_code=303, headers=_NO_STORE
+        )
+        _establish(claims, resp["refresh_token"], out)
         return out
 
     @router.post("/logout")

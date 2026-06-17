@@ -12,10 +12,12 @@ and threat model are documented inline in `identity_client/client.py`.
 ## Install
 
 ```
-identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.2.1#subdirectory=python
+identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.6.0#subdirectory=python
 ```
 
 The repo is public, so no credentials or build secrets are needed. Pin to a tag.
+`v0.6.0+` is the multi-provider API (`sign_in(provider, credential)`,
+`providers()`, `discord_start_url()`); older tags only know Google.
 For the optional FastAPI integration, add the extra: append `[fastapi]` to the
 package name (`identity-client[fastapi] @ git+...`).
 
@@ -29,11 +31,15 @@ client = IdentityClient(IdentityConfig(
     service_credential=SERVICE_CREDENTIAL,   # "<service-id>.<secret>", server-side only
 ))
 
-# Discover the shared Google client id for your login button (never hardcode it):
-cid = client.google_client_id()
+# Discover the enabled providers for your login buttons (never hardcode them):
+client.providers()                                # [{"id":"google","client_id":...}, {"id":"discord"}]
+cid = client.google_client_id()                   # Google client id, for the GIS button
+durl = client.discord_start_url()                 # where the browser navigates for Discord (or None)
 
-# After the browser relays a Google ID token to your backend:
-resp = client.sign_in(google_id_token)            # POST /auth/google
+# After the browser relays a credential to your backend, exchange it for tokens.
+# provider="google": the relayed Google ID token. provider="discord": the
+# single-use exchange code from identity's Discord return redirect.
+resp = client.sign_in("google", google_id_token)  # POST /auth/google (or /auth/discord/exchange)
 claims = client.verify(resp["access_token"])      # RS256 + aud/iss/exp, raises on failure
 if not is_admin_claim(claims):                    # gate on the value, not presence
     client.logout(resp.get("refresh_token", ""))
@@ -65,7 +71,7 @@ from identity_client.fastapi import IdentitySessions, auth_router, require_user
 
 client = IdentityClient(IdentityConfig(base_url=..., service_credential=...))
 sessions = IdentitySessions(client, secret_path=...)            # signed-cookie session
-app.include_router(auth_router(sessions), prefix="/api/auth")   # /login /logout /session /auth-config
+app.include_router(auth_router(sessions), prefix="/api/auth")   # /login /logout /session /auth-config /discord/callback
 
 user_required = require_user(sessions)                          # or require_admin(sessions)
 

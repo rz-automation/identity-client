@@ -85,7 +85,7 @@ def test_login_admits_any_user_and_sets_session():
     identity = FakeIdentity(admin=False)  # a regular, non-admin account
     client = _build(identity)
     _login(client)
-    assert identity.sign_in_calls == ["google-id-token"]
+    assert identity.sign_in_calls == [("google", "google-id-token")]
     r = client.get(_GATED_USER)
     assert r.status_code == 200
     assert r.json()["is_admin"] is False
@@ -101,12 +101,52 @@ def test_protected_route_requires_session():
     assert client.get(_GATED_USER).status_code == 401
 
 
-def test_auth_config_exposes_client_id():
+def test_auth_config_exposes_google_provider():
     identity = FakeIdentity()
     client = _build(identity)
     r = client.get("/api/auth/auth-config")
     assert r.status_code == 200
-    assert r.json()["google_client_id"] == identity.google_cid
+    providers = {p["id"]: p for p in r.json()["providers"]}
+    assert providers["google"]["client_id"] == identity.google_cid
+    assert "discord" not in providers
+
+
+def test_auth_config_exposes_discord_when_enabled():
+    identity = FakeIdentity(discord_enabled=True)
+    client = _build(identity)
+    r = client.get("/api/auth/auth-config")
+    providers = {p["id"]: p for p in r.json()["providers"]}
+    assert "discord" in providers
+    assert providers["discord"]["start_url"].endswith(
+        "/auth/discord/start?service_id=1"
+    )
+
+
+def test_discord_callback_establishes_session_and_redirects():
+    identity = FakeIdentity(discord_enabled=True, admin=False)
+    client = _build(identity)
+    r = client.get(
+        "/api/auth/discord/callback",
+        params={"code": "exchange-code"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] == "/"
+    assert identity.sign_in_calls == [("discord", "exchange-code")]
+    # The session cookie is set, so a gated route now passes.
+    assert client.get(_GATED_USER).status_code == 200
+
+
+def test_discord_callback_error_redirects_with_reason():
+    identity = FakeIdentity(discord_enabled=True)
+    client = _build(identity)
+    r = client.get(
+        "/api/auth/discord/callback",
+        params={"error": "access_denied"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "error=discord" in r.headers["location"]
 
 
 # --- user vs admin gate ------------------------------------------------------

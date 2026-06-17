@@ -246,7 +246,9 @@ class _PasswordCredential(BaseModel):
     # The email+password credential for the password provider, relayed
     # same-origin from the browser to /password/signup or /password/login.
     email: str = Field(default="", max_length=320)
-    password: str = Field(default="", max_length=1024)
+    # Match the server's MAX_PASSWORD_LENGTH (identity rejects >200 with a 400) so
+    # the form doesn't accept a password the server will then reject (review #7).
+    password: str = Field(default="", max_length=200)
 
 
 def _error(status: int, message: str) -> JSONResponse:

@@ -1,0 +1,10 @@
+# JitPack builds the Kotlin backend SDK from the `kotlin/` subfolder. The Python
+# SDK (`python/`) and the web module (`web/`) are not built here; they are
+# consumed as a pip VCS install and a copied static asset respectively.
+#
+# The published Maven coordinate is:
+#   com.github.rz-automation.identity-client:kotlin:<git-tag>
+jdk:
+  - openjdk17
+install:
+  - cd kotlin && ./gradlew clean publishToMavenLocal

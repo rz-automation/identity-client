@@ -20,7 +20,7 @@ repositories {
     maven("https://jitpack.io")
 }
 dependencies {
-    implementation("com.github.rz-automation.identity-client:kotlin:<tag>")
+    implementation("com.github.rz-automation.identity-client:kotlin:0.9.0")
 }
 ```
 

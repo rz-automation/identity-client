@@ -72,24 +72,34 @@ class IdentityClient(
      * identity is unreachable, so a login page degrades to "no buttons" rather
      * than erroring: correct under a hard cutover (no identity, no login).
      */
-    fun providers(): List<Provider> = synchronized(lock) {
-        val now = clock()
-        cachedProviders?.let { if (now - providersAt < providersTtlMillis) return it }
+    fun providers(): List<Provider> {
+        synchronized(lock) {
+            cachedProviders?.let { if (clock() - providersAt < providersTtlMillis) return it }
+        }
+        // Fetch OUTSIDE the lock: holding the monitor across this blocking round-trip
+        // would serialise every concurrent caller (and tie up threads) behind a slow
+        // or hanging identity endpoint. Concurrent callers may each fetch once on a
+        // cold cache; that is harmless and the result is then cached ~1h.
         val result = try {
             transport.get("${config.baseUrl}/auth-providers", config.authHeader)
         } catch (_: TransportException) {
-            return cachedProviders ?: emptyList()
+            return staleOrEmpty()
         }
-        if (result.status >= 400) return cachedProviders ?: emptyList()
+        if (result.status >= 400) return staleOrEmpty()
         val parsed = try {
             JSON.decodeFromString(ProvidersResponse.serializer(), result.body)
         } catch (_: Exception) {
-            return cachedProviders ?: emptyList()
+            return staleOrEmpty()
         }
-        cachedProviders = parsed.providers
-        providersAt = now
-        parsed.providers
+        return synchronized(lock) {
+            cachedProviders = parsed.providers
+            providersAt = clock()
+            parsed.providers
+        }
     }
+
+    /** Serve the cached provider list (or empty) when a fresh fetch failed. */
+    private fun staleOrEmpty(): List<Provider> = synchronized(lock) { cachedProviders ?: emptyList() }
 
     /**
      * This service's Google client id (from [providers]), or null. identity owns

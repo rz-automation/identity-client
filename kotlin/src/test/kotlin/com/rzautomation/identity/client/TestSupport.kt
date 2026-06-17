@@ -47,22 +47,30 @@ object TestSupport {
         kid: String = "k1",
         sub: String = "user-uuid-0001",
         issuer: String = "identity",
-        audience: String = SERVICE_ID,
+        audiences: List<String> = listOf(SERVICE_ID),
         email: String? = "player@example.test",
         isAdmin: Boolean = false,
         expiresInSeconds: Long = 600,
+        includeExp: Boolean = true,
     ): String {
         val now = System.currentTimeMillis()
-        val b = Jwts.builder()
-            .header().keyId(kid).and()
-            .subject(sub)
-            .issuer(issuer)
-            .audience().add(audience).and()
-            .issuedAt(Date(now))
-            .expiration(Date(now + expiresInSeconds * 1000))
+        val b = Jwts.builder().header().keyId(kid).and().subject(sub).issuer(issuer)
+        val aud = b.audience()
+        audiences.forEach { aud.add(it) }
+        aud.and().issuedAt(Date(now))
+        if (includeExp) b.expiration(Date(now + expiresInSeconds * 1000))
         if (email != null) b.claim("email", email)
         if (isAdmin) b.claim("is_admin", true)
         return b.signWith(pair.private, Jwts.SIG.RS256).compact()
+    }
+
+    /** A hand-crafted token with an arbitrary header and no signature, for testing
+     *  the header gate (alg=none, missing kid) without a real signing key. */
+    fun craftedToken(headerJson: String, payloadJson: String = """{"sub":"x"}"""): String {
+        val enc = Base64.getUrlEncoder().withoutPadding()
+        val h = enc.encodeToString(headerJson.toByteArray())
+        val p = enc.encodeToString(payloadJson.toByteArray())
+        return "$h.$p."
     }
 
     /**

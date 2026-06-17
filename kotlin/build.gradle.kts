@@ -14,8 +14,10 @@ plugins {
     `maven-publish`
 }
 
+// JitPack overrides this with the git tag at publish time; kept in sync with the
+// repo's release tag so local publishToMavenLocal matches the published artifact.
 group = "com.github.rz-automation.identity-client"
-version = "0.1.0"
+version = "0.9.0"
 
 kotlin {
     jvmToolchain(17)

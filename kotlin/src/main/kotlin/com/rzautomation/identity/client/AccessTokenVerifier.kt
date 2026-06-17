@@ -60,6 +60,11 @@ class AccessTokenVerifier(
 
         val key = signingKey(kid)
         val claims = try {
+            // JJWT has no explicit algorithm allow-list: it infers the alg from the
+            // header and refuses to verify a MAC/none token with an RSA public key.
+            // The hard RS256 pin is therefore the manual header check above (plus
+            // that key-type incompatibility) — do NOT remove it believing JJWT pins
+            // on its own.
             Jwts.parser()
                 .verifyWith(key)
                 .build()

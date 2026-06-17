@@ -5,7 +5,13 @@ Public API:
     from identity_client import (
         IdentityClient, IdentityConfig, AccessTokenVerifier,
         IdentityError, AuthRejected, IdentityUnavailable, is_admin_claim,
+        SessionPolicy,
     )
+
+``SessionPolicy`` is the framework-neutral session state machine (refresh /
+fail-closed / bounds) for building a login on any backend: a FastAPI app gets it
+wrapped by ``identity_client.fastapi.IdentitySessions``, and a Flask / other
+binding can drive it directly (decode cookie -> evaluate -> re-encode).
 
 Test helpers live in ``identity_client.testing`` (import them only from tests).
 
@@ -24,9 +30,9 @@ from .client import (
     IdentityUnavailable,
     is_admin_claim,
 )
-from .deletions import DeletionReconciler
+from .sessions import SessionPolicy
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "IdentityClient",
@@ -36,5 +42,5 @@ __all__ = [
     "AuthRejected",
     "IdentityUnavailable",
     "is_admin_claim",
-    "DeletionReconciler",
+    "SessionPolicy",
 ]

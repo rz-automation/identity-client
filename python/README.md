@@ -12,10 +12,12 @@ and threat model are documented inline in `identity_client/client.py`.
 ## Install
 
 ```
-identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.2.1#subdirectory=python
+identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.6.0#subdirectory=python
 ```
 
 The repo is public, so no credentials or build secrets are needed. Pin to a tag.
+`v0.6.0+` is the multi-provider API (`sign_in(provider, credential)`,
+`providers()`, `discord_start_url()`); older tags only know Google.
 For the optional FastAPI integration, add the extra: append `[fastapi]` to the
 package name (`identity-client[fastapi] @ git+...`).
 
@@ -29,11 +31,15 @@ client = IdentityClient(IdentityConfig(
     service_credential=SERVICE_CREDENTIAL,   # "<service-id>.<secret>", server-side only
 ))
 
-# Discover the shared Google client id for your login button (never hardcode it):
-cid = client.google_client_id()
+# Discover the enabled providers for your login buttons (never hardcode them):
+client.providers()                                # [{"id":"google","client_id":...}, {"id":"discord"}]
+cid = client.google_client_id()                   # Google client id, for the GIS button
+durl = client.discord_start_url()                 # where the browser navigates for Discord (or None)
 
-# After the browser relays a Google ID token to your backend:
-resp = client.sign_in(google_id_token)            # POST /auth/google
+# After the browser relays a credential to your backend, exchange it for tokens.
+# provider="google": the relayed Google ID token. provider="discord": the
+# single-use exchange code from identity's Discord return redirect.
+resp = client.sign_in("google", google_id_token)  # POST /auth/google (or /auth/discord/exchange)
 claims = client.verify(resp["access_token"])      # RS256 + aud/iss/exp, raises on failure
 if not is_admin_claim(claims):                    # gate on the value, not presence
     client.logout(resp.get("refresh_token", ""))
@@ -65,7 +71,7 @@ from identity_client.fastapi import IdentitySessions, auth_router, require_user
 
 client = IdentityClient(IdentityConfig(base_url=..., service_credential=...))
 sessions = IdentitySessions(client, secret_path=...)            # signed-cookie session
-app.include_router(auth_router(sessions), prefix="/api/auth")   # /login /logout /session /auth-config
+app.include_router(auth_router(sessions), prefix="/api/auth")   # /login /logout /session /auth-config /discord/callback
 
 user_required = require_user(sessions)                          # or require_admin(sessions)
 
@@ -81,55 +87,6 @@ session refreshes against identity when the access token goes stale and fails
 closed; lifetime is bounded by an idle timeout and an absolute cap, enforced from
 the cookie's own timestamps. Blocking identity calls run in a threadpool. Drive
 the whole flow in tests with `FakeIdentity`.
-
-## GDPR deletion (optional)
-
-If your app keeps pseudonymous per-user rows keyed on the global user id, erase
-them when the user is deleted at identity. A deleted user never signs in again, so
-you cannot wait for a sign-in to notice — consume the scoped deletion feed instead.
-
-Two halves. **Consume the feed** to purge any user the fleet deletes:
-
-```python
-from identity_client import DeletionReconciler
-from identity_client.fastapi import start_deletion_reconciler
-
-reconciler = DeletionReconciler(
-    client,
-    on_user_deleted=lambda user_id: db.execute(...),   # idempotent DELETE WHERE user_id = ?
-    get_cursor=lambda: store.read_cursor(),             # one integer you persist
-    set_cursor=lambda seq: store.write_cursor(seq),
-)
-
-@asynccontextmanager
-async def lifespan(app):
-    handle = start_deletion_reconciler(reconciler)      # one long-poll loop; single-writer
-    try:
-        yield
-    finally:
-        await handle.stop()
-```
-
-The reconciler long-polls the feed (near-instant), purges ids in `seq` order, and
-advances the cursor only past a successful purge. A failing purge blocks on that
-`seq` (it is not skipped) and is surfaced via the `on_blocked` hook — wire your
-alerting there. Run exactly one instance.
-
-**Offer self-service delete** by passing `on_account_deleted` to `auth_router`,
-which then mounts `/delete-account/challenge` and `/delete-account`:
-
-```python
-app.include_router(
-    auth_router(sessions, on_account_deleted=lambda user_id: db.execute(...)),
-    prefix="/api/auth",
-)
-```
-
-The SPA gets a re-auth nonce from `/delete-account/challenge`, uses it to mint a
-fresh provider token, and posts it to `/delete-account`. On success the account is
-erased fleet-wide; this app purges its own rows immediately and clears the session.
-That immediate purge is an optimisation — the feed re-delivers this app's own user
-id as the backstop, so erasure is guaranteed even if the local purge fails.
 
 ## Testing your integration
 

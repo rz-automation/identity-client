@@ -163,20 +163,33 @@ def _client(http) -> IdentityClient:
                           verifier=AccessTokenVerifier(cfg, session=http))
 
 
-def test_sign_in_returns_body_on_200():
+def test_sign_in_google_returns_body_on_200():
     http = FakeHTTP()
     http.queue_post(FakeResp({"access_token": "AT", "refresh_token": "RT"}))
-    body = _client(http).sign_in("google-token")
+    body = _client(http).sign_in("google", "google-token")
     assert body["access_token"] == "AT"
     assert http.post_calls[0][0].endswith("/auth/google")
     assert http.post_calls[0][1]["Authorization"] == f"Bearer {CREDENTIAL}"
+
+
+def test_sign_in_discord_posts_exchange_code():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "AT", "refresh_token": "RT"}))
+    body = _client(http).sign_in("discord", "exchange-code")
+    assert body["access_token"] == "AT"
+    assert http.post_calls[0][0].endswith("/auth/discord/exchange")
+
+
+def test_sign_in_unknown_provider_raises():
+    with pytest.raises(ValueError):
+        _client(FakeHTTP()).sign_in("myspace", "x")
 
 
 def test_sign_in_401_raises_auth_rejected():
     http = FakeHTTP()
     http.queue_post(FakeResp(status=401))
     with pytest.raises(AuthRejected):
-        _client(http).sign_in("bad")
+        _client(http).sign_in("google", "bad")
 
 
 def test_refresh_5xx_raises_unavailable():
@@ -228,6 +241,23 @@ def test_google_client_id_none_when_unreachable():
     assert _client(http).google_client_id() is None
 
 
+# --- discord discovery ------------------------------------------------------
+
+
+def test_discord_start_url_built_when_advertised():
+    http = FakeHTTP(
+        providers={"providers": [{"id": "google", "client_id": "abc"}, {"id": "discord"}]}
+    )
+    url = _client(http).discord_start_url()
+    assert url is not None
+    assert url.endswith("/auth/discord/start?service_id=1")
+
+
+def test_discord_start_url_none_when_not_advertised():
+    http = FakeHTTP(providers={"providers": [{"id": "google", "client_id": "abc"}]})
+    assert _client(http).discord_start_url() is None
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -254,7 +284,7 @@ def test_config_derives_service_id():
 def test_fake_identity_admin_and_demotion():
     from identity_client.testing import FakeIdentity
     fake = FakeIdentity()
-    assert is_admin_claim(fake.verify(fake.sign_in("g")["access_token"])) is True
+    assert is_admin_claim(fake.verify(fake.sign_in("google", "g")["access_token"])) is True
     fake.refresh_admin = False
     assert is_admin_claim(fake.verify("AT2")) is False
-    assert fake.sign_in_calls == ["g"]
+    assert fake.sign_in_calls == [("google", "g")]

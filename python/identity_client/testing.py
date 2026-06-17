@@ -37,8 +37,12 @@ class FakeIdentity:
 
     def __init__(self, *, admin: bool = True, sub: str = "user-123",
                  email: str = "user@example.com", aud: str = "1",
-                 google_client_id: str = "cid.apps.googleusercontent.com") -> None:
+                 google_client_id: str = "cid.apps.googleusercontent.com",
+                 discord_enabled: bool = False,
+                 base_url: str = "https://id.example.test") -> None:
         self.google_cid = google_client_id
+        self.discord_enabled = discord_enabled
+        self.base_url = base_url.rstrip("/")
         self.admin = admin
         self.sub = sub
         self.email = email
@@ -48,15 +52,9 @@ class FakeIdentity:
         self.refresh_admin: Optional[bool] = None   # override admin on refresh if set
         self.access_ttl = 600
         self.logout_calls: list[str] = []
-        self.sign_in_calls: list[str] = []
+        # Recorded as (provider, credential) tuples to match sign_in's signature.
+        self.sign_in_calls: list[tuple[str, str]] = []
         self.refresh_calls: list[str] = []
-        # GDPR-deletion: scripted feed pages + recorded trigger calls.
-        self.deletion_pages: list[dict[str, Any]] = []
-        self.challenge_calls: list[str] = []
-        self.delete_calls: list[tuple[str, str]] = []
-        self.challenge_result: dict[str, Any] = {"nonce": "N", "expires_at": "x"}
-        self.challenge_exc: Optional[Exception] = None
-        self.delete_exc: Optional[Exception] = None
 
     def _claims(self, *, admin: bool) -> dict[str, Any]:
         c = {"sub": self.sub, "email": self.email, "iss": "identity",
@@ -65,8 +63,8 @@ class FakeIdentity:
             c["is_admin"] = True
         return c
 
-    def sign_in(self, google_id_token: str) -> dict[str, Any]:
-        self.sign_in_calls.append(google_id_token)
+    def sign_in(self, provider: str, credential: str) -> dict[str, Any]:
+        self.sign_in_calls.append((provider, credential))
         if self.sign_in_exc is not None:
             raise self.sign_in_exc
         return {"access_token": "AT", "refresh_token": "RT", "expires_at": "x",
@@ -82,40 +80,25 @@ class FakeIdentity:
     def logout(self, refresh_token: str) -> None:
         self.logout_calls.append(refresh_token)
 
+    def providers(self) -> list[dict[str, Any]]:
+        provs: list[dict[str, Any]] = [{"id": "google", "client_id": self.google_cid}]
+        if self.discord_enabled:
+            provs.append({"id": "discord"})
+        return provs
+
     def google_client_id(self) -> Optional[str]:
         return self.google_cid
+
+    def discord_start_url(self) -> Optional[str]:
+        if not self.discord_enabled:
+            return None
+        return f"{self.base_url}/auth/discord/start?service_id={self.aud}"
 
     def verify(self, access_token: str) -> dict[str, Any]:
         if access_token == "AT2":
             admin = self.refresh_admin if self.refresh_admin is not None else self.admin
             return self._claims(admin=admin)
         return self._claims(admin=self.admin)
-
-    # -- GDPR deletion --
-
-    def request_deletion_challenge(self, user_id: str) -> dict[str, Any]:
-        self.challenge_calls.append(user_id)
-        if self.challenge_exc is not None:
-            raise self.challenge_exc
-        return self.challenge_result
-
-    def delete_user(self, user_id: str, google_id_token: str) -> dict[str, Any]:
-        self.delete_calls.append((user_id, google_id_token))
-        if self.delete_exc is not None:
-            raise self.delete_exc
-        return {"deleted": True}
-
-    def fetch_deletions(
-        self, since: int, *, limit: Optional[int] = None, wait: float = 0.0
-    ) -> dict[str, Any]:
-        """Pop the next scripted page, or an empty page advancing the cursor.
-
-        Fill ``deletion_pages`` with ``{"deletions": [...], "cursor": n}`` dicts.
-        When the queue is empty, returns an empty page with the cursor unchanged.
-        """
-        if self.deletion_pages:
-            return self.deletion_pages.pop(0)
-        return {"deletions": [], "cursor": since}
 
 
 # --- real-crypto helpers (for testing the verifier / a real gate) ------------

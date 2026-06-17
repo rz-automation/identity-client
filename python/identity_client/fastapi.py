@@ -15,10 +15,12 @@ It provides three things:
   enforced from the cookie's own timestamps. When the short-lived access token
   goes stale it refreshes against identity and **fails closed** on any
   uncertainty, so an identity-side disable/delete bites within one refresh cycle.
-* ``auth_router`` -- an ``APIRouter`` exposing ``/auth-config`` (Google client-id
-  discovery), ``/login`` (exchange a relayed Google credential for a session),
-  ``/logout`` (revoke + clear), and ``/session`` (report auth state). Mount it
-  under whatever prefix you like.
+* ``auth_router`` -- an ``APIRouter`` exposing ``/auth-config`` (enabled
+  providers + their public config), ``/login`` (exchange a relayed provider
+  credential -- Google ID token or Discord exchange code -- for a session),
+  ``/discord/callback`` (the browser-facing Discord return target), ``/logout``
+  (revoke + clear), and ``/session`` (report auth state). Mount it under whatever
+  prefix you like.
 * ``require_user`` / ``require_admin`` -- per-route dependencies. ``require_user``
   admits any signed-in identity account; ``require_admin`` additionally requires
   the ``is_admin`` claim. Both re-issue the (refreshed) cookie on the response.
@@ -43,23 +45,22 @@ an async app without stalling the event loop.
 """
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import os
 import secrets
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .client import AuthRejected, IdentityClient, IdentityError, is_admin_claim
-from .deletions import DeletionReconciler
+from .sessions import SessionPolicy
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
@@ -148,6 +149,17 @@ class IdentitySessions:
         self._secret_key = secret_key
         self._secret_path = secret_path
         self._serializer_cache: Optional[URLSafeTimedSerializer] = None
+        # The framework-neutral decision core; this class is its cookie/HTTP
+        # adapter. The refresh / fail-closed / bounds logic lives in SessionPolicy
+        # so other bindings (Flask, another language) reuse it instead of
+        # reimplementing it -- see identity_client.sessions.
+        self._policy = SessionPolicy(
+            client,
+            idle_timeout_seconds=idle_timeout_seconds,
+            absolute_lifetime_seconds=absolute_lifetime_seconds,
+            refresh_skew_seconds=refresh_skew_seconds,
+            admin_only=admin_only,
+        )
 
     @property
     def _serializer(self) -> URLSafeTimedSerializer:
@@ -171,16 +183,7 @@ class IdentitySessions:
 
     def new_session(self, claims: dict[str, Any], refresh_token: str) -> dict[str, Any]:
         """Build a fresh session payload from a verified access token's claims."""
-        now = int(time.time())
-        return {
-            "uid": str(claims.get("sub")),
-            "email": claims.get("email"),
-            "rt": refresh_token,
-            "axp": int(claims["exp"]),  # verified access-token expiry
-            "adm": is_admin_claim(claims),
-            "iat": now,  # login time (absolute-lifetime anchor)
-            "seen": now,  # last request time (idle-timeout anchor)
-        }
+        return self._policy.new_session(claims, refresh_token)
 
     def issue(self, response: Response, data: dict[str, Any]) -> None:
         """Write the signed session payload onto the response cookie."""
@@ -210,107 +213,95 @@ class IdentitySessions:
 
     # -- evaluation (the gate) --
 
-    def _in_bounds(self, data: dict[str, Any]) -> bool:
-        if not data.get("rt"):
-            return False
-        now = int(time.time())
-        if now - int(data.get("iat", 0)) >= self.absolute_lifetime_seconds:
-            return False
-        # idle_timeout_seconds=None opts out of the idle check entirely: the
-        # session then lives until the absolute lifetime or the refresh token
-        # lapses. Suits low-sensitivity consumers where a daily logout is pure
-        # friction; sensitive consumers keep the default.
-        if self.idle_timeout_seconds is not None:
-            if now - int(data.get("seen", 0)) >= self.idle_timeout_seconds:
-                return False
-        return True
-
-    def _try_refresh(self, data: dict[str, Any]) -> bool:
-        """Refresh the access token against identity; fail closed.
-
-        Mutates ``data`` (``axp``/``adm``) and returns True only on a verified,
-        unexpired token (and, when ``admin_only``, an ``is_admin`` one). Any other
-        outcome -- a 401, 5xx, timeout, malformed body, or demotion under
-        ``admin_only`` -- returns False so the caller denies the request.
-        """
-        try:
-            resp = self.client.refresh(data["rt"])
-            claims = self.client.verify(resp["access_token"])
-        except (IdentityError, KeyError):
-            return False
-        if self.admin_only and not is_admin_claim(claims):
-            return False
-        exp = claims.get("exp")
-        if not isinstance(exp, (int, float)):
-            return False
-        data["axp"] = int(exp)
-        data["adm"] = is_admin_claim(claims)
-        return True
-
     def evaluate(self, request: Request) -> tuple[bool, Optional[dict[str, Any]]]:
         """Decide whether the request carries a live session.
 
-        Returns ``(authed, data)``. When ``authed`` is True, ``data`` is the
+        Decodes the signed cookie and delegates the decision to the
+        framework-neutral :class:`~identity_client.sessions.SessionPolicy`.
+        Returns ``(authed, data)``: when ``authed`` is True, ``data`` is the
         (possibly refreshed) payload the caller must re-issue so the bumped
         expiry/last-seen persist. Blocking: makes a synchronous identity call
         when refreshing, so async callers run it in a threadpool.
         """
-        data = self.read(request)
-        if data is None or not self._in_bounds(data):
-            return (False, None)
-        if int(time.time()) >= int(data.get("axp", 0)) - self.refresh_skew_seconds:
-            if not self._try_refresh(data):
-                return (False, None)
-        data["seen"] = int(time.time())
-        return (True, data)
+        return self._policy.evaluate(self.read(request))
 
 
 # --- routes ------------------------------------------------------------------
 
 
 class _Credential(BaseModel):
-    # The Google ID token the sign-in button hands the SPA, relayed here.
+    # The provider credential relayed from the browser: a Google ID token for
+    # provider="google", or the single-use exchange code for provider="discord".
     credential: str = Field(default="", max_length=4096)
+    provider: str = Field(default="google", max_length=32)
 
 
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message}, headers=_NO_STORE)
 
 
+def _append_query(url: str, params: dict[str, str]) -> str:
+    """Return *url* with *params* merged into its query string."""
+    parts = urlparse(url)
+    query = dict(parse_qsl(parts.query))
+    query.update(params)
+    return urlunparse(parts._replace(query=urlencode(query)))
+
+
 def auth_router(
     sessions: IdentitySessions,
     *,
-    on_account_deleted: Optional[Callable[[str], None]] = None,
+    post_login_path: str = "/",
 ) -> APIRouter:
-    """Build the login surface (``/auth-config``, ``/login``, ``/logout``,
-    ``/session``) for *sessions*. Mount it under any prefix you like::
+    """Build the login surface for *sessions*. Mount it under any prefix you like::
 
         app.include_router(auth_router(sessions), prefix="/api/auth")
 
-    Pass ``on_account_deleted`` to also expose the self-service GDPR delete flow
-    (``/delete-account/challenge`` and ``/delete-account``). The callback is your
-    app's idempotent local purge for one user id; it runs after identity confirms
-    the global erasure. The feed reconciler re-delivers this app's own user id as a
-    backstop, so the immediate local purge is an optimisation, not a correctness
-    dependency.
+    Routes:
+      * ``GET  /auth-config`` -- the enabled providers + their public config
+        (Google client id, Discord start URL), for a frontend to render buttons.
+      * ``POST /login`` -- exchange a relayed provider credential (a Google ID
+        token, or a Discord exchange code) for a session.
+      * ``GET  /discord/callback`` -- the browser-facing Discord return target.
+        Register THIS URL (e.g. ``https://app.example/api/auth/discord/callback``)
+        as the service's Discord return URL in identity's admin console. It reads
+        the exchange code, establishes the session, and redirects to
+        ``post_login_path`` (``?error=...`` on failure).
+      * ``POST /logout`` -- revoke + clear. ``GET /session`` -- report auth state.
     """
     router = APIRouter()
     client = sessions.client
-    user_dep = require_user(sessions)
 
     @router.get("/auth-config")
     async def auth_config() -> JSONResponse:
-        cid = await run_in_threadpool(client.google_client_id)
-        return JSONResponse(content={"google_client_id": cid}, headers=_NO_STORE)
+        provs = await run_in_threadpool(client.providers)
+        out_providers: list[dict[str, Any]] = []
+        for p in provs:
+            if p.get("id") == "discord":
+                start_url = await run_in_threadpool(client.discord_start_url)
+                out_providers.append({"id": "discord", "start_url": start_url})
+            elif p.get("id") == "google":
+                out_providers.append(
+                    {"id": "google", "client_id": p.get("client_id")}
+                )
+        return JSONResponse(
+            content={"providers": out_providers}, headers=_NO_STORE
+        )
+
+    def _establish(claims: dict[str, Any], refresh_token: str, out: Response) -> None:
+        """Write the session cookie for a verified sign-in onto *out*."""
+        sessions.issue(out, sessions.new_session(claims, refresh_token))
 
     @router.post("/login")
     async def login(body: _Credential) -> JSONResponse:
         if not body.credential:
             return _error(400, "No credential received.")
         try:
-            resp = await run_in_threadpool(client.sign_in, body.credential)
+            resp = await run_in_threadpool(
+                client.sign_in, body.provider, body.credential
+            )
             claims = await run_in_threadpool(client.verify, resp["access_token"])
-        except AuthRejected:
+        except (AuthRejected, ValueError):
             return _error(401, "Sign-in was rejected.")
         except (IdentityError, KeyError):
             return _error(503, "Sign-in service is unavailable. Try again shortly.")
@@ -325,7 +316,48 @@ def auth_router(
             return _error(503, "Sign-in returned an unexpected response.")
 
         out = JSONResponse(content={"ok": True}, headers=_NO_STORE)
-        sessions.issue(out, sessions.new_session(claims, resp["refresh_token"]))
+        _establish(claims, resp["refresh_token"], out)
+        return out
+
+    @router.get("/discord/callback")
+    async def discord_callback(
+        code: str = "", error: Optional[str] = None
+    ) -> RedirectResponse:
+        """Browser-facing Discord return target (register as the service's URL).
+
+        identity bounces the browser here with ``?code=`` after a successful
+        Discord login (or ``?error=`` on denial). We swap the code for a session
+        and redirect to ``post_login_path``; on any failure we redirect there with
+        ``?error=...`` so the SPA can show a message. A redirect (not JSON) because
+        this is a top-level navigation, not a fetch.
+        """
+        def _fail(reason: str) -> RedirectResponse:
+            return RedirectResponse(
+                _append_query(post_login_path, {"error": reason}),
+                status_code=303,
+                headers=_NO_STORE,
+            )
+
+        if error or not code:
+            return _fail("discord")
+        try:
+            resp = await run_in_threadpool(client.sign_in, "discord", code)
+            claims = await run_in_threadpool(client.verify, resp["access_token"])
+        except AuthRejected:
+            return _fail("rejected")
+        except (IdentityError, KeyError):
+            return _fail("unavailable")
+
+        if sessions.admin_only and not is_admin_claim(claims):
+            await run_in_threadpool(client.logout, resp.get("refresh_token", ""))
+            return _fail("forbidden")
+        if not isinstance(claims.get("exp"), (int, float)) or not claims.get("sub"):
+            return _fail("unexpected")
+
+        out = RedirectResponse(
+            post_login_path, status_code=303, headers=_NO_STORE
+        )
+        _establish(claims, resp["refresh_token"], out)
         return out
 
     @router.post("/logout")
@@ -346,55 +378,6 @@ def auth_router(
         else:
             sessions.clear(out)
         return out
-
-    if on_account_deleted is not None:
-
-        @router.post("/delete-account/challenge")
-        async def delete_account_challenge(
-            response: Response, user: IdentityUser = Depends(user_dep)
-        ) -> Any:
-            """Start the self-service delete: get a re-auth nonce for this user.
-
-            The SPA passes the returned nonce to the provider sign-in to mint a
-            fresh re-auth token, then posts it to ``/delete-account``. Returns
-            ``{already_deleted: True}`` if the account is already gone (skip the
-            re-auth, just tear down locally).
-            """
-            try:
-                result = await run_in_threadpool(
-                    client.request_deletion_challenge, user.id
-                )
-            except AuthRejected:
-                return _error(401, "Re-authentication required.")
-            except IdentityError:
-                return _error(503, "Account service is unavailable. Try again shortly.")
-            response.headers["Cache-Control"] = "no-store"
-            return result
-
-        @router.post("/delete-account")
-        async def delete_account(
-            body: _Credential, user: IdentityUser = Depends(user_dep)
-        ) -> JSONResponse:
-            """Finish the self-service delete: relay the fresh re-auth token.
-
-            On success identity has committed the global erasure; this app purges
-            its own rows immediately and clears the session. A failed re-auth
-            (``401``) leaves everything intact for a retry.
-            """
-            if not body.credential:
-                return _error(400, "No credential received.")
-            try:
-                await run_in_threadpool(client.delete_user, user.id, body.credential)
-            except AuthRejected:
-                return _error(401, "Re-authentication failed.")
-            except IdentityError:
-                return _error(503, "Account service is unavailable. Try again shortly.")
-            # Immediate local purge (optimisation; the feed re-delivers our own id
-            # as the backstop), then clear the session.
-            await run_in_threadpool(on_account_deleted, user.id)
-            out = JSONResponse(content={"ok": True}, headers=_NO_STORE)
-            sessions.clear(out)
-            return out
 
     return router
 
@@ -446,107 +429,10 @@ def require_admin(sessions: IdentitySessions) -> Callable[..., IdentityUser]:
     return dependency
 
 
-# --- deletion-feed reconciler (background task) ------------------------------
-
-
-async def run_reconciler(
-    reconciler: DeletionReconciler,
-    *,
-    wait: float = 25.0,
-    retry_backoff: float = 5.0,
-    idle_sleep: float = 1.0,
-    stop: Optional[asyncio.Event] = None,
-) -> None:
-    """Drive a :class:`DeletionReconciler` as one serialized long-poll loop.
-
-    Each iteration long-polls the feed (blocking call run in a threadpool) and
-    purges whatever it returns. On a transient identity error it backs off and
-    retries from the unchanged cursor, so nothing is lost. This is a SINGLE
-    serialized loop: the bounded ``wait`` is both the latency mechanism and the
-    periodic floor (a silently dropped connection re-polls within ``wait`` plus
-    the client's read margin), so there is no second racing task to coordinate.
-
-    When a poll drains work the loop re-polls immediately (to keep draining); when
-    it returns nothing -- or is blocked on a poison seq -- it pauses ``idle_sleep``
-    first. That pause is what stops a server that returns immediately (``wait``
-    unsupported, or ``wait=0``) from becoming a hot loop, and rate-limits a blocked
-    seq's retries; against a real long-poll the call already consumed ~``wait``
-    seconds, so the pause is negligible.
-
-    Run exactly one of these per app (the reconciler is single-writer on the
-    cursor). Start it from your app's startup and stop it on shutdown, e.g. via
-    :func:`start_deletion_reconciler`.
-    """
-    while stop is None or not stop.is_set():
-        try:
-            processed = await run_in_threadpool(reconciler.reconcile_page, wait)
-        except asyncio.CancelledError:
-            raise
-        except IdentityError:
-            # identity unreachable / 5xx; cursor unchanged, just retry.
-            await asyncio.sleep(retry_backoff)
-            continue
-        except Exception:  # noqa: BLE001 - the loop must outlive any single error
-            await asyncio.sleep(retry_backoff)
-            continue
-        if not processed:
-            await asyncio.sleep(idle_sleep)
-
-
-class ReconcilerHandle:
-    """Handle to a running reconciler loop; ``await handle.stop()`` to end it."""
-
-    def __init__(self, task: "asyncio.Task[None]", stop: asyncio.Event) -> None:
-        self._task = task
-        self._stop = stop
-
-    async def stop(self) -> None:
-        self._stop.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-
-
-def start_deletion_reconciler(
-    reconciler: DeletionReconciler,
-    *,
-    wait: float = 25.0,
-    retry_backoff: float = 5.0,
-    idle_sleep: float = 1.0,
-) -> ReconcilerHandle:
-    """Start :func:`run_reconciler` as a background task and return its handle.
-
-    Call from within a running event loop (your app's startup/lifespan). Store the
-    handle and ``await handle.stop()`` on shutdown::
-
-        @asynccontextmanager
-        async def lifespan(app):
-            handle = start_deletion_reconciler(reconciler)
-            try:
-                yield
-            finally:
-                await handle.stop()
-    """
-    stop = asyncio.Event()
-    task = asyncio.create_task(
-        run_reconciler(
-            reconciler,
-            wait=wait,
-            retry_backoff=retry_backoff,
-            idle_sleep=idle_sleep,
-            stop=stop,
-        )
-    )
-    return ReconcilerHandle(task, stop)
-
-
 __all__ = [
     "IdentityUser",
     "IdentitySessions",
     "auth_router",
     "require_user",
     "require_admin",
-    "run_reconciler",
-    "start_deletion_reconciler",
-    "ReconcilerHandle",
 ]

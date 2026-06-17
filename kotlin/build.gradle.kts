@@ -14,10 +14,13 @@ plugins {
     `maven-publish`
 }
 
-// JitPack overrides this with the git tag at publish time; kept in sync with the
-// repo's release tag so local publishToMavenLocal matches the published artifact.
-group = "com.github.rz-automation.identity-client"
-version = "0.9.0"
+// Coordinate matches what JitPack serves for this repo: it maps a single-artifact
+// build to `com.github.rz-automation:identity-client:<git-tag>` regardless of the
+// subfolder. Mirroring it here means a local publishToMavenLocal produces the
+// exact same coordinate, so a consumer resolves identically online and offline.
+// JitPack overrides `version` with the git tag at publish time.
+group = "com.github.rz-automation"
+version = "0.9.1"
 
 kotlin {
     jvmToolchain(17)
@@ -52,8 +55,7 @@ tasks.test {
 publishing {
     publications {
         create<MavenPublication>("maven") {
-            // artifactId mirrors the JitPack module name (the subfolder).
-            artifactId = "kotlin"
+            artifactId = "identity-client"
             from(components["java"])
         }
     }

@@ -20,12 +20,14 @@ repositories {
     maven("https://jitpack.io")
 }
 dependencies {
-    implementation("com.github.rz-automation.identity-client:kotlin:0.9.0")
+    implementation("com.github.rz-automation:identity-client:0.9.1")
 }
 ```
 
-> The exact coordinate (group `com.github.rz-automation.identity-client`,
-> artifact `kotlin`) should be smoke-tested against the first published tag.
+> JitPack maps this repo's single build artifact to
+> `com.github.rz-automation:identity-client:<tag>` (verified against the published
+> tag). The same coordinate is produced by `./gradlew publishToMavenLocal`, so an
+> offline build resolves it from `mavenLocal()` identically.
 
 ## Use
 

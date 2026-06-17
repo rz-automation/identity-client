@@ -299,6 +299,10 @@ def auth_router(
                 out_providers.append(
                     {"id": "google", "client_id": p.get("client_id")}
                 )
+            elif p.get("id") == "password":
+                # No public config — its presence is the whole signal (the web
+                # module renders the in-page email/password form when it sees it).
+                out_providers.append({"id": "password"})
         return JSONResponse(
             content={"providers": out_providers}, headers=_NO_STORE
         )

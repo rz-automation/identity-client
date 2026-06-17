@@ -122,6 +122,24 @@ def test_auth_config_exposes_discord_when_enabled():
     )
 
 
+def test_auth_config_exposes_password_when_enabled():
+    """The password provider must be relayed so the web module renders the
+    in-page email/password form (it keys off provider id == 'password')."""
+    identity = FakeIdentity(password_enabled=True)
+    client = _build(identity)
+    r = client.get("/api/auth/auth-config")
+    providers = {p["id"] for p in r.json()["providers"]}
+    assert "password" in providers
+
+
+def test_auth_config_omits_password_when_disabled():
+    identity = FakeIdentity()  # password off by default
+    client = _build(identity)
+    r = client.get("/api/auth/auth-config")
+    providers = {p["id"] for p in r.json()["providers"]}
+    assert "password" not in providers
+
+
 def test_discord_callback_establishes_session_and_redirects():
     identity = FakeIdentity(discord_enabled=True, admin=False)
     client = _build(identity)

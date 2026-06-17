@@ -39,9 +39,11 @@ class FakeIdentity:
                  email: str = "user@example.com", aud: str = "1",
                  google_client_id: str = "cid.apps.googleusercontent.com",
                  discord_enabled: bool = False,
+                 password_enabled: bool = False,
                  base_url: str = "https://id.example.test") -> None:
         self.google_cid = google_client_id
         self.discord_enabled = discord_enabled
+        self.password_enabled = password_enabled
         self.base_url = base_url.rstrip("/")
         self.admin = admin
         self.sub = sub
@@ -104,6 +106,8 @@ class FakeIdentity:
         provs: list[dict[str, Any]] = [{"id": "google", "client_id": self.google_cid}]
         if self.discord_enabled:
             provs.append({"id": "discord"})
+        if self.password_enabled:
+            provs.append({"id": "password"})
         return provs
 
     def google_client_id(self) -> Optional[str]:

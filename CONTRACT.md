@@ -147,7 +147,7 @@ identity. A binding (the Python `auth_router` is the reference) exposes:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/auth-config` | `{ providers: [ { id: "google", client_id }, { id: "discord", start_url } ] }` — what buttons to render. |
+| GET | `/auth-config` | `{ providers: [ { id: "google", client_id }, { id: "discord", start_url }, { id: "password" } ] }` — what buttons to render (each provider present only when enabled). |
 | POST | `/login` | `{ provider, credential }` -> establish session, `{ "ok": true }`. Used by Google (the relayed GIS credential). |
 | POST | `/password/signup` | `{ email, password }` -> establish session, `{ "ok": true }`. On the actionable 4xx returns that status with `{ "error": str }`. |
 | POST | `/password/login` | `{ email, password }` -> establish session, `{ "ok": true }`. `401` is generic ("Incorrect email or password."); `429/404` pass through with `{ "error": str }`. |

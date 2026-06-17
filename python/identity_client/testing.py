@@ -48,12 +48,15 @@ class FakeIdentity:
         self.email = email
         self.aud = aud
         self.sign_in_exc: Optional[Exception] = None
+        self.password_exc: Optional[Exception] = None
         self.refresh_exc: Optional[Exception] = None
         self.refresh_admin: Optional[bool] = None   # override admin on refresh if set
         self.access_ttl = 600
         self.logout_calls: list[str] = []
         # Recorded as (provider, credential) tuples to match sign_in's signature.
         self.sign_in_calls: list[tuple[str, str]] = []
+        # Recorded as (op, email, password) for password_signup/password_login.
+        self.password_calls: list[tuple[str, str, str]] = []
         self.refresh_calls: list[str] = []
 
     def _claims(self, *, admin: bool) -> dict[str, Any]:
@@ -70,6 +73,23 @@ class FakeIdentity:
         return {"access_token": "AT", "refresh_token": "RT", "expires_at": "x",
                 "user": {"id": self.sub, "email": self.email,
                          "is_new": False}}
+
+    def _password_body(self) -> dict[str, Any]:
+        return {"access_token": "AT", "refresh_token": "RT", "expires_at": "x",
+                "user": {"id": self.sub, "email": self.email,
+                         "is_new": True}}
+
+    def password_signup(self, email: str, password: str) -> dict[str, Any]:
+        self.password_calls.append(("signup", email, password))
+        if self.password_exc is not None:
+            raise self.password_exc
+        return self._password_body()
+
+    def password_login(self, email: str, password: str) -> dict[str, Any]:
+        self.password_calls.append(("login", email, password))
+        if self.password_exc is not None:
+            raise self.password_exc
+        return self._password_body()
 
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         self.refresh_calls.append(refresh_token)

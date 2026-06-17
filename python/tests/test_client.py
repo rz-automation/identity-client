@@ -20,6 +20,7 @@ from identity_client import (
     IdentityClient,
     IdentityConfig,
     IdentityUnavailable,
+    PasswordRejected,
     is_admin_claim,
 )
 from identity_client.testing import (
@@ -210,6 +211,73 @@ def test_logout_never_raises():
     http = FakeHTTP()
     http.queue_post(requests.ConnectionError("down"))
     _client(http).logout("RT")
+
+
+# --- email+password ---------------------------------------------------------
+
+
+def test_password_signup_returns_body_on_200():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "AT", "refresh_token": "RT",
+                              "user": {"id": "u", "email": "user@example.com",
+                                       "is_new": True}}))
+    body = _client(http).password_signup("user@example.com", "pw")
+    assert body["access_token"] == "AT"
+    assert http.post_calls[0][0].endswith("/auth/password/signup")
+    assert http.post_calls[0][2] == {"email": "user@example.com", "password": "pw"}
+    assert http.post_calls[0][1]["Authorization"] == f"Bearer {CREDENTIAL}"
+
+
+def test_password_login_returns_body_on_200():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "AT", "refresh_token": "RT"}))
+    body = _client(http).password_login("user@example.com", "pw")
+    assert body["access_token"] == "AT"
+    assert http.post_calls[0][0].endswith("/auth/password/login")
+    assert http.post_calls[0][2] == {"email": "user@example.com", "password": "pw"}
+
+
+def test_password_signup_409_raises_password_rejected_with_status():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Email already in use."}},
+                             status=409))
+    with pytest.raises(PasswordRejected) as exc:
+        _client(http).password_signup("user@example.com", "pw")
+    assert exc.value.status == 409
+    assert exc.value.message == "Email already in use."
+
+
+def test_password_signup_400_weak_password_carries_message():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Password too weak."}},
+                             status=400))
+    with pytest.raises(PasswordRejected) as exc:
+        _client(http).password_signup("user@example.com", "x")
+    assert exc.value.status == 400
+    assert exc.value.message == "Password too weak."
+
+
+def test_password_login_401_raises_auth_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp(status=401))
+    with pytest.raises(AuthRejected):
+        _client(http).password_login("user@example.com", "bad")
+
+
+def test_password_login_429_raises_password_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Too many attempts."}},
+                             status=429))
+    with pytest.raises(PasswordRejected) as exc:
+        _client(http).password_login("user@example.com", "pw")
+    assert exc.value.status == 429
+
+
+def test_password_5xx_raises_unavailable():
+    http = FakeHTTP()
+    http.queue_post(FakeResp(status=503))
+    with pytest.raises(IdentityUnavailable):
+        _client(http).password_login("user@example.com", "pw")
 
 
 # --- google client id discovery ---------------------------------------------

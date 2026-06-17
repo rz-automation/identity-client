@@ -12,12 +12,13 @@ and threat model are documented inline in `identity_client/client.py`.
 ## Install
 
 ```
-identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.6.0#subdirectory=python
+identity-client @ git+https://github.com/rz-automation/identity-client.git@v0.8.0#subdirectory=python
 ```
 
 The repo is public, so no credentials or build secrets are needed. Pin to a tag.
 `v0.6.0+` is the multi-provider API (`sign_in(provider, credential)`,
-`providers()`, `discord_start_url()`); older tags only know Google.
+`providers()`, `discord_start_url()`); `v0.8.0+` adds email+password
+(`password_signup` / `password_login`). Older tags only know Google.
 For the optional FastAPI integration, add the extra: append `[fastapi]` to the
 package name (`identity-client[fastapi] @ git+...`).
 
@@ -40,6 +41,11 @@ durl = client.discord_start_url()                 # where the browser navigates 
 # provider="google": the relayed Google ID token. provider="discord": the
 # single-use exchange code from identity's Discord return redirect.
 resp = client.sign_in("google", google_id_token)  # POST /auth/google (or /auth/discord/exchange)
+# Email+password is a two-field credential, so it has its own pair of methods:
+#   client.password_signup(email, password)       # POST /auth/password/signup
+#   client.password_login(email, password)         # POST /auth/password/login
+# both return the same body; an actionable 4xx (400 weak / 409 taken / 404 not
+# enabled / 429 rate-limited) raises PasswordRejected(.status, .message).
 claims = client.verify(resp["access_token"])      # RS256 + aud/iss/exp, raises on failure
 if not is_admin_claim(claims):                    # gate on the value, not presence
     client.logout(resp.get("refresh_token", ""))

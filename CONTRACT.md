@@ -41,13 +41,20 @@ non-JSON body means treat as unavailable. Both deny (see §5).
 |--------|------|---------|----------|
 | POST | `/auth/google` | `{ "google_id_token": str }` | `{ access_token, refresh_token, expires_at, user: { id, email, is_new } }` |
 | POST | `/auth/discord/exchange` | `{ "code": str }` | same as `/auth/google` |
+| POST | `/auth/password/signup` | `{ "email": str, "password": str }` | same as `/auth/google`. Errors: `400` weak password, `409` email taken, `404` password not enabled. |
+| POST | `/auth/password/login` | `{ "email": str, "password": str }` | same as `/auth/google`. Errors: `401` generic (wrong/unknown), `429` rate-limited, `404` not enabled. |
 | POST | `/auth/refresh` | `{ "refresh_token": str }` | `{ access_token, expires_at }` |
 | POST | `/auth/logout` | `{ "refresh_token": str }` | `{ "ok": true }` (best-effort; always succeeds) |
-| GET | `/auth-providers` | (credential optional) | `{ "providers": [ { "id": "google", "client_id": str\|null }, { "id": "discord" } ] }` |
+| GET | `/auth-providers` | (credential optional) | `{ "providers": [ { "id": "google", "client_id": str\|null }, { "id": "discord" }, { "id": "password" } ] }` |
 
 `sign_in(provider, credential)` dispatches: `google` -> `/auth/google` with
 `{google_id_token: credential}`; `discord` -> `/auth/discord/exchange` with
-`{code: credential}`. Both return the same body.
+`{code: credential}`. Both return the same body. Email+password is separate
+(two fields, not one relayed token): `password_signup(email, password)` ->
+`/auth/password/signup` and `password_login(email, password)` ->
+`/auth/password/login`. The actionable 4xx above (`400/404/409/429`) carry
+`{ "detail": { "error": str } }`; a client surfaces them with their status
+rather than collapsing to "unavailable".
 
 ---
 
@@ -142,6 +149,8 @@ identity. A binding (the Python `auth_router` is the reference) exposes:
 |--------|------|---------|
 | GET | `/auth-config` | `{ providers: [ { id: "google", client_id }, { id: "discord", start_url } ] }` — what buttons to render. |
 | POST | `/login` | `{ provider, credential }` -> establish session, `{ "ok": true }`. Used by Google (the relayed GIS credential). |
+| POST | `/password/signup` | `{ email, password }` -> establish session, `{ "ok": true }`. On the actionable 4xx returns that status with `{ "error": str }`. |
+| POST | `/password/login` | `{ email, password }` -> establish session, `{ "ok": true }`. `401` is generic ("Incorrect email or password."); `429/404` pass through with `{ "error": str }`. |
 | GET | `/discord/callback` | The browser-facing Discord return target. Registered as the service's return URL in identity. Reads `?code`, establishes the session, redirects to the app (`?error=...` on failure). |
 | POST | `/logout` | Revoke + clear. |
 | GET | `/session` | `{ "authenticated": bool }`. |

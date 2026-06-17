@@ -59,7 +59,13 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from .client import AuthRejected, IdentityClient, IdentityError, is_admin_claim
+from .client import (
+    AuthRejected,
+    IdentityClient,
+    IdentityError,
+    PasswordRejected,
+    is_admin_claim,
+)
 from .sessions import SessionPolicy
 
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -236,6 +242,15 @@ class _Credential(BaseModel):
     provider: str = Field(default="google", max_length=32)
 
 
+class _PasswordCredential(BaseModel):
+    # The email+password credential for the password provider, relayed
+    # same-origin from the browser to /password/signup or /password/login.
+    email: str = Field(default="", max_length=320)
+    # Match the server's MAX_PASSWORD_LENGTH (identity rejects >200 with a 400) so
+    # the form doesn't accept a password the server will then reject (review #7).
+    password: str = Field(default="", max_length=200)
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message}, headers=_NO_STORE)
 
@@ -318,6 +333,48 @@ def auth_router(
         out = JSONResponse(content={"ok": True}, headers=_NO_STORE)
         _establish(claims, resp["refresh_token"], out)
         return out
+
+    async def _password_session(
+        call: Callable[..., dict[str, Any]], *args: Any
+    ) -> JSONResponse:
+        """Run a password signup/login, verify, and establish the session.
+
+        Maps failures the same way ``/login`` does, plus a ``PasswordRejected``
+        path that surfaces identity's precise status + message. Shared by the
+        two password routes; the caller supplies the right ``client`` method and
+        the (email, password) args.
+        """
+        try:
+            resp = await run_in_threadpool(call, *args)
+            claims = await run_in_threadpool(client.verify, resp["access_token"])
+        except PasswordRejected as e:
+            return _error(e.status, e.message)
+        except AuthRejected:
+            return _error(401, "Incorrect email or password.")
+        except (IdentityError, KeyError):
+            return _error(503, "Sign-in service is unavailable. Try again shortly.")
+
+        if sessions.admin_only and not is_admin_claim(claims):
+            await run_in_threadpool(client.logout, resp.get("refresh_token", ""))
+            return _error(403, "This account is not authorized.")
+        if not isinstance(claims.get("exp"), (int, float)) or not claims.get("sub"):
+            return _error(503, "Sign-in returned an unexpected response.")
+
+        out = JSONResponse(content={"ok": True}, headers=_NO_STORE)
+        _establish(claims, resp["refresh_token"], out)
+        return out
+
+    @router.post("/password/signup")
+    async def password_signup(body: _PasswordCredential) -> JSONResponse:
+        return await _password_session(
+            client.password_signup, body.email, body.password
+        )
+
+    @router.post("/password/login")
+    async def password_login(body: _PasswordCredential) -> JSONResponse:
+        return await _password_session(
+            client.password_login, body.email, body.password
+        )
 
     @router.get("/discord/callback")
     async def discord_callback(

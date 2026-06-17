@@ -15,6 +15,8 @@
  *                                        { id: "google", client_id: "..." },
  *                                        { id: "discord", start_url: "..." } ] }
  *   POST {basePath}/login         <- { provider: "google", credential }  (Google)
+ *   POST {basePath}/password/login   <- { email, password }  (password provider)
+ *   POST {basePath}/password/signup  <- { email, password }  (password provider)
  *   GET  {basePath}/discord/callback   (browser is redirected here by identity)
  *   GET  {basePath}/session       -> { authenticated: bool }
  *   POST {basePath}/logout
@@ -33,6 +35,12 @@ const GIS_SRC = "https://accounts.google.com/gsi/client";
 const DEFAULT_LABELS = {
   discord: "Continue with Discord",
   error: "Sign-in failed. Please try again.",
+  passwordEmail: "Email",
+  passwordPassword: "Password",
+  passwordSignIn: "Sign in",
+  passwordCreate: "Create account",
+  passwordToggleToSignup: "Create account",
+  passwordToggleToLogin: "Have an account? Sign in",
 };
 
 let _gisPromise = null;
@@ -131,6 +139,9 @@ export async function mountAuth(container, options = {}) {
     } else if (provider.id === "discord" && provider.start_url) {
       root.appendChild(renderDiscord(provider.start_url, labels));
       rendered.push("discord");
+    } else if (provider.id === "password") {
+      root.appendChild(renderPassword({ basePath, onSignedIn, onError, labels }));
+      rendered.push("password");
     }
   }
 
@@ -187,6 +198,94 @@ function renderDiscord(startUrl, labels) {
     text: labels.discord,
   });
   return link;
+}
+
+/**
+ * Render the email+password form: email + password inputs, a primary action
+ * button, and a toggle that flips the primary action between Sign in (login)
+ * and Create account (signup). Submits same-origin to {basePath}/password/login
+ * or {basePath}/password/signup; on ok runs onSignedIn, else surfaces the
+ * server's {error} via onError.
+ */
+function renderPassword(ctx) {
+  const { basePath, onSignedIn, onError, labels } = ctx;
+  let mode = "login"; // "login" | "signup"
+
+  const email = el("input", {
+    class: "identity-auth-password-email",
+    type: "email",
+    name: "email",
+    autocomplete: "email",
+    placeholder: labels.passwordEmail,
+  });
+  const password = el("input", {
+    class: "identity-auth-password-password",
+    type: "password",
+    name: "password",
+    autocomplete: "current-password",
+    placeholder: labels.passwordPassword,
+  });
+  const submit = el("button", {
+    class: "identity-auth-password-submit",
+    type: "submit",
+  });
+  const toggle = el("a", {
+    class: "identity-auth-password-toggle",
+    href: "#",
+    role: "button",
+  });
+
+  function applyMode() {
+    submit.textContent =
+      mode === "login" ? labels.passwordSignIn : labels.passwordCreate;
+    toggle.textContent =
+      mode === "login"
+        ? labels.passwordToggleToSignup
+        : labels.passwordToggleToLogin;
+    password.setAttribute(
+      "autocomplete",
+      mode === "login" ? "current-password" : "new-password",
+    );
+  }
+  applyMode();
+
+  toggle.addEventListener("click", (e) => {
+    e.preventDefault();
+    mode = mode === "login" ? "signup" : "login";
+    applyMode();
+  });
+
+  const form = el("form", { class: "identity-auth-password" }, [
+    email,
+    password,
+    submit,
+    toggle,
+  ]);
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    submit.disabled = true;
+    const path = mode === "login" ? "password/login" : "password/signup";
+    try {
+      const resp = await fetch(`${basePath}/${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ email: email.value, password: password.value }),
+      });
+      if (resp.ok) {
+        onSignedIn(await safeJson(resp));
+        return;
+      }
+      onError((await safeJson(resp))?.error || labels.error);
+    } catch (err) {
+      onError(labels.error);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  return form;
 }
 
 async function safeJson(resp) {

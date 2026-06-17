@@ -70,6 +70,19 @@ class IdentityUnavailable(IdentityError):
     this still denies access, but it is *not* a statement about the user."""
 
 
+class PasswordRejected(IdentityError):
+    """identity rejected an email+password signup/login with an *actionable*
+    4xx (400 weak password, 409 email taken, 404 password not enabled, 429
+    rate-limited). Unlike the generic ``IdentityUnavailable`` collapse, this
+    carries the precise ``.status`` and a human ``.message`` so the caller can
+    show the right thing to the user."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
 # --- config ------------------------------------------------------------------
 
 
@@ -314,6 +327,35 @@ class IdentityClient:
             return self._post("/auth/discord/exchange", {"code": credential})
         raise ValueError(f"unknown provider {provider!r}")
 
+    def password_signup(self, email: str, password: str) -> dict[str, Any]:
+        """Create an account with the email+password provider (POST
+        /auth/password/signup).
+
+        Separate from ``sign_in(provider, credential)`` because password is a
+        two-field credential, not a single relayed token. Returns the identity
+        body (``access_token``, ``refresh_token``, ``expires_at``, ``user``).
+        Raises ``PasswordRejected`` on an actionable 4xx (400 weak password,
+        409 email taken, 404 password not enabled for the service),
+        ``AuthRejected`` on 401, and ``IdentityUnavailable`` otherwise.
+        """
+        return self._post_password(
+            "/auth/password/signup", {"email": email, "password": password}
+        )
+
+    def password_login(self, email: str, password: str) -> dict[str, Any]:
+        """Sign in with the email+password provider (POST /auth/password/login).
+
+        Separate from ``sign_in(provider, credential)`` because password is a
+        two-field credential, not a single relayed token. Returns the identity
+        body (``access_token``, ``refresh_token``, ``expires_at``, ``user``).
+        Raises ``PasswordRejected`` on an actionable 4xx (404 not enabled, 429
+        rate-limited), ``AuthRejected`` on 401 (wrong/unknown — generic on
+        purpose), and ``IdentityUnavailable`` otherwise.
+        """
+        return self._post_password(
+            "/auth/password/login", {"email": email, "password": password}
+        )
+
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         """Mint a fresh access token (POST /auth/refresh).
 
@@ -356,6 +398,42 @@ class IdentityClient:
         except requests.RequestException as exc:
             raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
         return self._parse(resp, path)
+
+    def _post_password(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST to a password endpoint, mapping statuses precisely.
+
+        Unlike ``_parse`` (which collapses every non-401 >=400 to
+        ``IdentityUnavailable``), this preserves the actionable 4xx as a
+        ``PasswordRejected`` carrying the status + the ``detail.error`` message,
+        so the caller can show the user why.
+        """
+        try:
+            resp = self._session.post(
+                f"{self.config.base_url}{path}",
+                headers=self.config._auth_header,
+                json=body,
+                timeout=self.config.request_timeout,
+            )
+        except requests.RequestException as exc:
+            raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
+        if resp.status_code in (200, 201):
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise IdentityUnavailable(
+                    f"identity {path} returned a non-JSON body"
+                ) from exc
+        if resp.status_code == 401:
+            raise AuthRejected(f"identity {path} rejected (401)")
+        if resp.status_code in (400, 404, 409, 429):
+            msg = "request rejected"
+            try:
+                d = resp.json().get("detail")
+                msg = (d.get("error") if isinstance(d, dict) else d) or msg
+            except (ValueError, AttributeError):
+                pass
+            raise PasswordRejected(resp.status_code, msg)
+        raise IdentityUnavailable(f"identity {path} returned {resp.status_code}")
 
     @staticmethod
     def _parse(resp: Any, path: str) -> dict[str, Any]:

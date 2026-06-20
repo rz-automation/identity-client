@@ -251,6 +251,19 @@ class _PasswordCredential(BaseModel):
     password: str = Field(default="", max_length=200)
 
 
+class _ResetRequest(BaseModel):
+    email: str = Field(default="", max_length=320)
+
+
+class _ResetValidate(BaseModel):
+    token: str = Field(default="", max_length=512)
+
+
+class _ResetConfirm(BaseModel):
+    token: str = Field(default="", max_length=512)
+    password: str = Field(default="", max_length=200)
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": message}, headers=_NO_STORE)
 
@@ -378,6 +391,40 @@ def auth_router(
     async def password_login(body: _PasswordCredential) -> JSONResponse:
         return await _password_session(
             client.password_login, body.email, body.password
+        )
+
+    async def _reset_proxy(
+        call: Callable[..., dict[str, Any]], *args: Any
+    ) -> JSONResponse:
+        """Proxy a password-reset call to identity and return its body verbatim.
+
+        No session is established (reset doesn't sign the user in — they sign in
+        afterwards). Maps ``PasswordRejected`` to identity's status + message,
+        ``AuthRejected`` to 401, and any other identity error to 503. The reset
+        token (when present in args) is never logged here.
+        """
+        try:
+            body = await run_in_threadpool(call, *args)
+        except PasswordRejected as e:
+            return _error(e.status, e.message)
+        except AuthRejected:
+            return _error(401, "Request was rejected.")
+        except IdentityError:
+            return _error(503, "Service is unavailable. Try again shortly.")
+        return JSONResponse(content=body, headers=_NO_STORE)
+
+    @router.post("/password/reset/request")
+    async def password_reset_request(body: _ResetRequest) -> JSONResponse:
+        return await _reset_proxy(client.password_reset_request, body.email)
+
+    @router.post("/password/reset/validate")
+    async def password_reset_validate(body: _ResetValidate) -> JSONResponse:
+        return await _reset_proxy(client.password_reset_validate, body.token)
+
+    @router.post("/password/reset/confirm")
+    async def password_reset_confirm(body: _ResetConfirm) -> JSONResponse:
+        return await _reset_proxy(
+            client.password_reset_confirm, body.token, body.password
         )
 
     @router.get("/discord/callback")

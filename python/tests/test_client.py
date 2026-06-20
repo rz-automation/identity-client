@@ -280,6 +280,53 @@ def test_password_5xx_raises_unavailable():
         _client(http).password_login("user@example.com", "pw")
 
 
+# --- password reset ---------------------------------------------------------
+
+
+def test_password_reset_request_posts_email_and_returns_body():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"ok": True}))
+    body = _client(http).password_reset_request("user@example.com")
+    assert body == {"ok": True}
+    assert http.post_calls[0][0].endswith("/auth/password/reset/request")
+    assert http.post_calls[0][2] == {"email": "user@example.com"}
+
+
+def test_password_reset_request_404_raises_password_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Not enabled."}}, status=404))
+    with pytest.raises(PasswordRejected) as exc:
+        _client(http).password_reset_request("user@example.com")
+    assert exc.value.status == 404
+
+
+def test_password_reset_validate_returns_validity():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"valid": True}))
+    body = _client(http).password_reset_validate("tok")
+    assert body == {"valid": True}
+    assert http.post_calls[0][0].endswith("/auth/password/reset/validate")
+    assert http.post_calls[0][2] == {"token": "tok"}
+
+
+def test_password_reset_confirm_posts_token_and_password():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"ok": True}))
+    body = _client(http).password_reset_confirm("tok", "a new password")
+    assert body == {"ok": True}
+    assert http.post_calls[0][0].endswith("/auth/password/reset/confirm")
+    assert http.post_calls[0][2] == {"token": "tok", "password": "a new password"}
+
+
+def test_password_reset_confirm_400_raises_password_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Link no longer valid."}},
+                             status=400))
+    with pytest.raises(PasswordRejected) as exc:
+        _client(http).password_reset_confirm("stale", "a new password")
+    assert exc.value.status == 400
+
+
 # --- google client id discovery ---------------------------------------------
 
 

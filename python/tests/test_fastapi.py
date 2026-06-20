@@ -223,6 +223,58 @@ def test_password_login_401_is_generic():
     assert r.json()["error"] == "Incorrect email or password."
 
 
+# --- password reset ----------------------------------------------------------
+
+
+def test_password_reset_request_proxies_and_no_session():
+    identity = FakeIdentity()
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/reset/request", json={"email": "user@example.com"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True}
+    assert identity.reset_calls == [("request", "user@example.com")]
+    # Reset never logs the user in.
+    assert client.get(_GATED_USER).status_code == 401
+
+
+def test_password_reset_validate_returns_validity():
+    identity = FakeIdentity()
+    identity.reset_valid = False
+    client = _build(identity)
+    r = client.post("/api/auth/password/reset/validate", json={"token": "tok"})
+    assert r.status_code == 200
+    assert r.json() == {"valid": False}
+    assert identity.reset_calls == [("validate", "tok")]
+
+
+def test_password_reset_confirm_proxies():
+    identity = FakeIdentity()
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/reset/confirm",
+        json={"token": "tok", "password": "a new password"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    assert identity.reset_calls == [("confirm", "tok")]
+
+
+def test_password_reset_confirm_rejection_passes_status():
+    from identity_client import PasswordRejected
+
+    identity = FakeIdentity()
+    identity.password_exc = PasswordRejected(400, "This reset link is no longer valid.")
+    client = _build(identity)
+    r = client.post(
+        "/api/auth/password/reset/confirm",
+        json={"token": "stale", "password": "a new password"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "This reset link is no longer valid."
+
+
 # --- user vs admin gate ------------------------------------------------------
 
 

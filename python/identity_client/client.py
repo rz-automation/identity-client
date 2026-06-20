@@ -356,6 +356,45 @@ class IdentityClient:
             "/auth/password/login", {"email": email, "password": password}
         )
 
+    def password_reset_request(self, email: str) -> dict[str, Any]:
+        """Start a password reset (POST /auth/password/reset/request).
+
+        The consumer's backend proxies this from its "forgot password" form.
+        Always returns a generic success body regardless of whether the address
+        has an account (identity never reveals that); identity sends the reset
+        email out of band. Raises ``PasswordRejected`` on an actionable 4xx
+        (404 password not enabled, 429 rate-limited), ``AuthRejected`` on 401,
+        and ``IdentityUnavailable`` otherwise.
+        """
+        return self._post_password(
+            "/auth/password/reset/request", {"email": email}
+        )
+
+    def password_reset_validate(self, token: str) -> dict[str, Any]:
+        """Check whether a reset token is still usable (POST
+        /auth/password/reset/validate). Returns ``{"valid": bool}`` so the
+        consumer's reset page can show a clear dead-link state before asking for a
+        new password. Raises ``PasswordRejected`` on 429, ``AuthRejected`` on
+        401, ``IdentityUnavailable`` otherwise.
+        """
+        return self._post_password(
+            "/auth/password/reset/validate", {"token": token}
+        )
+
+    def password_reset_confirm(
+        self, token: str, password: str
+    ) -> dict[str, Any]:
+        """Set a new password from a reset token (POST
+        /auth/password/reset/confirm). Returns a generic success body. Raises
+        ``PasswordRejected`` on an actionable 4xx (400 weak password or an
+        expired/used/invalid token), ``AuthRejected`` on 401, and
+        ``IdentityUnavailable`` otherwise.
+        """
+        return self._post_password(
+            "/auth/password/reset/confirm",
+            {"token": token, "password": password},
+        )
+
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         """Mint a fresh access token (POST /auth/refresh).
 

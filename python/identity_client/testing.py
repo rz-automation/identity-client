@@ -60,6 +60,9 @@ class FakeIdentity:
         # Recorded as (op, email, password) for password_signup/password_login.
         self.password_calls: list[tuple[str, str, str]] = []
         self.refresh_calls: list[str] = []
+        # Password-reset stand-ins. ``reset_valid`` drives validate's result.
+        self.reset_calls: list[tuple[str, str]] = []
+        self.reset_valid: bool = True
 
     def _claims(self, *, admin: bool) -> dict[str, Any]:
         c = {"sub": self.sub, "email": self.email, "iss": "identity",
@@ -92,6 +95,24 @@ class FakeIdentity:
         if self.password_exc is not None:
             raise self.password_exc
         return self._password_body()
+
+    def password_reset_request(self, email: str) -> dict[str, Any]:
+        self.reset_calls.append(("request", email))
+        if self.password_exc is not None:
+            raise self.password_exc
+        return {"ok": True}
+
+    def password_reset_validate(self, token: str) -> dict[str, Any]:
+        self.reset_calls.append(("validate", token))
+        if self.password_exc is not None:
+            raise self.password_exc
+        return {"valid": self.reset_valid}
+
+    def password_reset_confirm(self, token: str, password: str) -> dict[str, Any]:
+        self.reset_calls.append(("confirm", token))
+        if self.password_exc is not None:
+            raise self.password_exc
+        return {"ok": True}
 
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         self.refresh_calls.append(refresh_token)

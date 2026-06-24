@@ -420,6 +420,41 @@ class IdentityClient:
         except requests.RequestException:
             pass
 
+    def delete_account(self, user_id: str) -> None:
+        """GDPR-delete *user_id* in this service's realm.
+
+        POST ``/api/v1/users/{id}/delete``. Realm-local erasure: tombstones the
+        account identity holds for this service (null email, scrub provider
+        links, invalidate refresh tokens, set deleted), scoped to a user this
+        service serves. Back a self-serve "delete my account" control with it;
+        the app erases its own per-user rows separately.
+
+        Idempotent: identity answers ``404`` when the user is already gone
+        (already tombstoned, or never in this service's scope), which this
+        treats as success — a retried or double-submitted delete still resolves
+        to "the account is gone."
+
+        Raises ``AuthRejected`` on ``401`` (bad/inactive service credential) and
+        ``IdentityUnavailable`` if identity is unreachable or errors otherwise: a
+        delete that cannot be confirmed must fail loud, so the caller does not
+        report success or tear down the session on an unconfirmed erasure.
+        """
+        path = f"/api/v1/users/{user_id}/delete"
+        try:
+            resp = self._session.post(
+                f"{self.config.base_url}{path}",
+                headers=self.config._auth_header,
+                json={},
+                timeout=self.config.request_timeout,
+            )
+        except requests.RequestException as exc:
+            raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
+        if resp.status_code in (200, 404):
+            return
+        if resp.status_code == 401:
+            raise AuthRejected(f"identity {path} rejected the request (401)")
+        raise IdentityUnavailable(f"identity {path} returned {resp.status_code}")
+
     def verify(self, access_token: str) -> dict[str, Any]:
         """Verify an access token (delegates to the bundled verifier)."""
         return self.verifier.verify(access_token)

@@ -213,6 +213,45 @@ def test_logout_never_raises():
     _client(http).logout("RT")
 
 
+# --- delete_account ---------------------------------------------------------
+
+
+def test_delete_account_posts_to_scoped_delete_endpoint():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"ok": True}))
+    _client(http).delete_account("user-123")
+    assert http.post_calls[0][0].endswith("/api/v1/users/user-123/delete")
+    assert http.post_calls[0][1]["Authorization"] == f"Bearer {CREDENTIAL}"
+
+
+def test_delete_account_404_is_idempotent_success():
+    """Already gone / out of scope -> identity 404 -> treated as success."""
+    http = FakeHTTP()
+    http.queue_post(FakeResp(status=404))
+    _client(http).delete_account("user-123")  # must not raise
+
+
+def test_delete_account_401_raises_auth_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp(status=401))
+    with pytest.raises(AuthRejected):
+        _client(http).delete_account("user-123")
+
+
+def test_delete_account_5xx_raises_unavailable():
+    http = FakeHTTP()
+    http.queue_post(FakeResp(status=503))
+    with pytest.raises(IdentityUnavailable):
+        _client(http).delete_account("user-123")
+
+
+def test_delete_account_timeout_raises_unavailable():
+    http = FakeHTTP()
+    http.queue_post(requests.Timeout("slow"))
+    with pytest.raises(IdentityUnavailable):
+        _client(http).delete_account("user-123")
+
+
 # --- email+password ---------------------------------------------------------
 
 

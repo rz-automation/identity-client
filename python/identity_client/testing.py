@@ -60,6 +60,10 @@ class FakeIdentity:
         # Recorded as (op, email, password) for password_signup/password_login.
         self.password_calls: list[tuple[str, str, str]] = []
         self.refresh_calls: list[str] = []
+        # Account-delete stand-in: records each deleted user id; ``delete_exc``
+        # lets a test force a failure (AuthRejected / IdentityUnavailable).
+        self.delete_calls: list[str] = []
+        self.delete_exc: Optional[Exception] = None
         # Password-reset stand-ins. ``reset_valid`` drives validate's result.
         self.reset_calls: list[tuple[str, str]] = []
         self.reset_valid: bool = True
@@ -122,6 +126,11 @@ class FakeIdentity:
 
     def logout(self, refresh_token: str) -> None:
         self.logout_calls.append(refresh_token)
+
+    def delete_account(self, user_id: str) -> None:
+        self.delete_calls.append(user_id)
+        if self.delete_exc is not None:
+            raise self.delete_exc
 
     def providers(self) -> list[dict[str, Any]]:
         provs: list[dict[str, Any]] = [{"id": "google", "client_id": self.google_cid}]

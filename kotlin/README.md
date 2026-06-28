@@ -55,6 +55,10 @@ when (val decision = policy.evaluate(decodedSession)) {
 
 // 3. Logout.
 identity.logout(session.rt)
+
+// 4. GDPR "delete my account": erase the user in this service's realm, then
+//    erase your own per-user rows. Idempotent (404 == already gone).
+identity.deleteAccount(userId)                             // throws AuthRejected / IdentityUnavailable
 ```
 
 `IdentityClient`, `AccessTokenVerifier`, and `SessionPolicy` are all synchronous

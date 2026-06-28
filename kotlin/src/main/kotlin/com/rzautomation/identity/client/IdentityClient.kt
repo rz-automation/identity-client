@@ -197,6 +197,38 @@ class IdentityClient(
     /** Verify an access token (delegates to the bundled [verifier]). */
     fun verify(accessToken: String): Claims = verifier.verify(accessToken)
 
+    /**
+     * GDPR-delete [userId] in this service's realm
+     * (`POST /api/v1/users/{id}/delete`). Realm-local erasure: identity
+     * tombstones the account it holds for this service (null email, scrub
+     * provider links, invalidate refresh tokens, set deleted), scoped to a user
+     * this service serves. Back a "delete my account" control with it; the app
+     * erases its own per-user rows separately.
+     *
+     * Idempotent: identity answers 404 when the user is already gone (already
+     * tombstoned, or never in this service's scope), which this treats as
+     * success: a retried or double-submitted delete still resolves to "the
+     * account is gone."
+     *
+     * Throws [AuthRejected] on 401 (bad/inactive service credential) and
+     * [IdentityUnavailable] if identity is unreachable or errors otherwise: a
+     * delete that cannot be confirmed must fail loud, so the caller does not
+     * report success or tear the session down on an unconfirmed erasure.
+     */
+    fun deleteAccount(userId: String) {
+        val path = "/api/v1/users/$userId/delete"
+        val result = try {
+            transport.post("${config.baseUrl}$path", config.authHeader, "{}")
+        } catch (e: TransportException) {
+            throw IdentityUnavailable("identity $path unreachable: ${e.message}", e)
+        }
+        when {
+            result.status == 200 || result.status == 404 -> return
+            result.status == 401 -> throw AuthRejected("identity $path rejected (401)")
+            else -> throw IdentityUnavailable("identity $path returned ${result.status}")
+        }
+    }
+
     // --- internals ---
 
     private fun <T> post(path: String, body: JsonObject, deserializer: KSerializer<T>): T {

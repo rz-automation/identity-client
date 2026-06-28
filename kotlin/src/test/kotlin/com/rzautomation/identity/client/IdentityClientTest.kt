@@ -116,6 +116,35 @@ class IdentityClientTest {
     }
 
     @Test
+    fun `deleteAccount treats 200 and 404 alike as success`() {
+        val ok = FakeTransport().apply { onPost("/delete") { HttpResult(200, """{"ok":true}""") } }
+        clientWith(ok).deleteAccount("user-uuid-0001") // no throw
+
+        val gone = FakeTransport().apply {
+            onPost("/delete") { HttpResult(404, """{"detail":{"error":"User not found."}}""") }
+        }
+        clientWith(gone).deleteAccount("user-uuid-0001") // idempotent, no throw
+    }
+
+    @Test
+    fun `deleteAccount 401 maps to AuthRejected`() {
+        val transport = FakeTransport().apply { onPost("/delete") { HttpResult(401, "") } }
+        assertFailsWith<AuthRejected> { clientWith(transport).deleteAccount("user-uuid-0001") }
+    }
+
+    @Test
+    fun `deleteAccount 5xx maps to IdentityUnavailable`() {
+        val transport = FakeTransport().apply { onPost("/delete") { HttpResult(500, "boom") } }
+        assertFailsWith<IdentityUnavailable> { clientWith(transport).deleteAccount("user-uuid-0001") }
+    }
+
+    @Test
+    fun `deleteAccount transport failure maps to IdentityUnavailable`() {
+        val transport = FakeTransport().apply { postThrows = true }
+        assertFailsWith<IdentityUnavailable> { clientWith(transport).deleteAccount("user-uuid-0001") }
+    }
+
+    @Test
     fun `discordStartUrl is null when discord is not advertised`() {
         val transport = FakeTransport().apply {
             onGet("/auth-providers") {

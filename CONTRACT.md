@@ -45,7 +45,7 @@ non-JSON body means treat as unavailable. Both deny (see §5).
 | POST | `/auth/password/login` | `{ "email": str, "password": str }` | same as `/auth/google`. Errors: `401` generic (wrong/unknown), `429` rate-limited, `404` not enabled. |
 | POST | `/auth/refresh` | `{ "refresh_token": str }` | `{ access_token, expires_at }` |
 | POST | `/auth/logout` | `{ "refresh_token": str }` | `{ "ok": true }` (best-effort; always succeeds) |
-| POST | `/api/v1/users/{id}/delete` | (none) | `{ "ok": true }`. Realm-local GDPR delete, scoped to a user this service serves. Idempotent: `404` (already gone / out of scope) is treated as success by `delete_account`. |
+| POST | `/api/v1/users/{id}/delete` | (none) | `{ "ok": true }`. Realm-local GDPR delete, scoped to a user this service serves. Idempotent: `404` (already gone / out of scope) is treated as success by the client (`delete_account` / `deleteAccount`). |
 | GET | `/auth-providers` | (credential optional) | `{ "providers": [ { "id": "google", "client_id": str\|null }, { "id": "discord" }, { "id": "password" } ] }` |
 
 `sign_in(provider, credential)` dispatches: `google` -> `/auth/google` with

@@ -65,7 +65,9 @@ class IdentityClient(
      * Refresh coalescing window (see [refresh]). Concurrent refreshes of the same
      * refresh token within this many milliseconds share one network call, so a page
      * load firing many authenticated requests at once does not multiply into one
-     * refresh each. Set to 0 to disable coalescing.
+     * refresh each. The default trades coalescing strength against revocation
+     * latency: ~10s is well under identity's ~10-min access-token lifetime, so the
+     * extra staleness it can add is negligible. Set to 0 to disable coalescing.
      */
     private val refreshCoalesceMillis: Long = 10_000,
 ) {
@@ -192,9 +194,17 @@ class IdentityClient(
      * every in-flight request independently refresh the same about-to-expire token,
      * so one page load firing a dozen authenticated requests at once turns into a
      * dozen identical refreshes. Coalescing collapses that burst to one call. The
-     * window is short so a revoked token is re-checked promptly, the monitor is per
-     * token so unrelated sessions never block each other, and errors are not cached
-     * (the next caller retries).
+     * monitor is per token so unrelated sessions never block each other, and errors
+     * are not cached (the next caller retries). A revoked refresh token stops minting
+     * new access tokens after at most one window: within it, coalesced callers reuse
+     * the already-minted access token (itself an independently-verified bearer token,
+     * so this grants nothing they would not already have for its lifetime).
+     * [RefreshResponse] is immutable, so sharing one instance across callers is safe.
+     *
+     * Assumes `/auth/refresh` does not rotate refresh tokens (the response carries no
+     * new refresh token and the presented token stays valid): the cache is keyed by
+     * the presented token, so if identity ever introduces rotation this must be
+     * revisited.
      */
     fun refresh(refreshToken: String): RefreshResponse {
         if (refreshCoalesceMillis <= 0) return doRefresh(refreshToken)

@@ -105,7 +105,9 @@ class IdentityConfig:
     # Refresh coalescing window (see IdentityClient.refresh). Concurrent refreshes
     # of the same refresh token within this many seconds share one network call,
     # so a page load that fires many authenticated requests at once does not
-    # multiply into one refresh each. Set to 0 to disable coalescing.
+    # multiply into one refresh each. The default trades coalescing strength
+    # against revocation latency: ~10s is well under identity's ~10-min access-token
+    # lifetime, so the extra staleness it can add is negligible. Set 0 to disable.
     refresh_coalesce_seconds: float = 10.0
     service_id: str = field(init=False)
 
@@ -419,9 +421,18 @@ class IdentityClient:
         otherwise has every in-flight request independently refresh the same
         about-to-expire token, so one page load firing a dozen authenticated
         requests at once turns into a dozen identical refreshes. Coalescing
-        collapses that burst to one call. The window is short so a revoked token is
-        re-checked promptly, and the lock is per token so unrelated sessions never
-        block each other. Errors are not cached (the next caller retries).
+        collapses that burst to one call. The lock is per token so unrelated
+        sessions never block each other, and errors are not cached (the next caller
+        retries). A revoked refresh token stops minting new access tokens after at
+        most one window: within the window, coalesced callers reuse the
+        already-minted access token (itself an independently-verified bearer token,
+        so this grants nothing they would not already have for its lifetime).
+
+        Each caller gets its own copy of the result dict, so a caller mutating it
+        cannot corrupt the shared cache entry. **Assumes ``/auth/refresh`` does not
+        rotate refresh tokens** (the response carries no new refresh token and the
+        presented token stays valid): the cache is keyed by the presented token, so
+        if identity ever introduces rotation this coalescing must be revisited.
         """
         window = self.config.refresh_coalesce_seconds
         if window <= 0:
@@ -431,7 +442,7 @@ class IdentityClient:
         with self._refresh_state_lock:
             hit = self._refresh_cache.get(refresh_token)
             if hit is not None and (now - hit[0]) < window:
-                return hit[1]
+                return dict(hit[1])
             token_lock = self._refresh_locks.get(refresh_token)
             if token_lock is None:
                 token_lock = threading.Lock()
@@ -445,7 +456,7 @@ class IdentityClient:
                 with self._refresh_state_lock:
                     hit = self._refresh_cache.get(refresh_token)
                     if hit is not None and (now - hit[0]) < window:
-                        return hit[1]
+                        return dict(hit[1])
                 # We are the single caller that actually talks to identity.
                 result = self._post(
                     "/auth/refresh", {"refresh_token": refresh_token}
@@ -453,7 +464,8 @@ class IdentityClient:
                 with self._refresh_state_lock:
                     self._refresh_cache[refresh_token] = (time.monotonic(), result)
                     self._prune_refresh_cache_locked()
-                return result
+                # Hand back a copy so the cached entry stays private to the cache.
+                return dict(result)
         finally:
             # Drop the registry entry (success or failure) so it cannot accumulate;
             # waiters already hold their own reference to the lock object, and later

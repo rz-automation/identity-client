@@ -8,6 +8,7 @@ expired, unknown ``kid``) are the ones that must never regress.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import jwt
@@ -158,8 +159,8 @@ def test_jwks_unreachable_raises_unavailable():
 # --- client: the three calls ------------------------------------------------
 
 
-def _client(http) -> IdentityClient:
-    cfg = _config()
+def _client(http, **cfg_kw) -> IdentityClient:
+    cfg = _config(**cfg_kw)
     return IdentityClient(cfg, session=http,
                           verifier=AccessTokenVerifier(cfg, session=http))
 
@@ -205,6 +206,90 @@ def test_refresh_timeout_raises_unavailable():
     http.queue_post(requests.Timeout("slow"))
     with pytest.raises(IdentityUnavailable):
         _client(http).refresh("RT")
+
+
+# --- client: refresh coalescing ---------------------------------------------
+
+
+def _refresh_posts(http) -> int:
+    return sum(1 for c in http.post_calls if c[0].endswith("/auth/refresh"))
+
+
+def test_concurrent_refresh_same_token_coalesces_to_one_call():
+    # A page load fires many authenticated requests at once and the per-request
+    # gate refreshes the same token from each. They must collapse to ONE network
+    # call: only one refresh response is queued, so a second POST would pop an
+    # empty queue and raise.
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "AT", "expires_at": "later"}))
+    client = _client(http)
+
+    barrier = threading.Barrier(12)
+    results: list = []
+    errors: list = []
+
+    def worker():
+        barrier.wait()  # release all at once to maximise overlap
+        try:
+            results.append(client.refresh("RT"))
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(results) == 12
+    assert all(r["access_token"] == "AT" for r in results)
+    assert _refresh_posts(http) == 1  # twelve callers, one network refresh
+
+
+def test_refresh_different_tokens_do_not_coalesce():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "A1"}))
+    http.queue_post(FakeResp({"access_token": "A2"}))
+    client = _client(http)
+    assert client.refresh("RT-1")["access_token"] == "A1"
+    assert client.refresh("RT-2")["access_token"] == "A2"
+    assert _refresh_posts(http) == 2  # distinct tokens never share a refresh
+
+
+def test_refresh_caches_within_window_then_refetches_after():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "A1"}))
+    http.queue_post(FakeResp({"access_token": "A2"}))
+    client = _client(http, refresh_coalesce_seconds=0.05)
+    first = client.refresh("RT")["access_token"]
+    cached = client.refresh("RT")["access_token"]  # within window: reuse
+    time.sleep(0.1)  # window lapses
+    refetched = client.refresh("RT")["access_token"]  # fresh network call
+    assert first == "A1" and cached == "A1" and refetched == "A2"
+    assert _refresh_posts(http) == 2
+
+
+def test_refresh_coalescing_can_be_disabled():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"access_token": "A1"}))
+    http.queue_post(FakeResp({"access_token": "A2"}))
+    client = _client(http, refresh_coalesce_seconds=0)
+    client.refresh("RT")
+    client.refresh("RT")
+    assert _refresh_posts(http) == 2  # disabled: each call hits identity
+
+
+def test_refresh_error_is_not_cached():
+    http = FakeHTTP()
+    http.queue_post(FakeResp(status=401))             # first attempt: rejected
+    http.queue_post(FakeResp({"access_token": "AT"}))  # a later retry succeeds
+    client = _client(http)
+    with pytest.raises(AuthRejected):
+        client.refresh("RT")
+    # The failure was not cached, so a later call actually retries identity.
+    assert client.refresh("RT")["access_token"] == "AT"
+    assert _refresh_posts(http) == 2
 
 
 def test_logout_never_raises():

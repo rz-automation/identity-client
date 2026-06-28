@@ -61,10 +61,24 @@ class IdentityClient(
     val verifier: AccessTokenVerifier = AccessTokenVerifier(config, transport),
     private val providersTtlMillis: Long = 3_600_000,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Refresh coalescing window (see [refresh]). Concurrent refreshes of the same
+     * refresh token within this many milliseconds share one network call, so a page
+     * load firing many authenticated requests at once does not multiply into one
+     * refresh each. Set to 0 to disable coalescing.
+     */
+    private val refreshCoalesceMillis: Long = 10_000,
 ) {
     private val lock = Any()
     private var cachedProviders: List<Provider>? = null
     private var providersAt: Long = 0
+
+    // Refresh coalescing: a short result cache keyed by refresh token, plus a
+    // per-token monitor so concurrent callers of the same token serialise onto one
+    // network call. Different tokens never contend. Guarded by [refreshLock].
+    private val refreshLock = Any()
+    private val refreshInflight = HashMap<String, Any>()
+    private val refreshCache = HashMap<String, Pair<Long, RefreshResponse>>()
 
     /**
      * Discover this service's enabled login providers from `/auth-providers`,
@@ -171,8 +185,56 @@ class IdentityClient(
     /**
      * Mint a fresh access token. Throws [AuthRejected] when the refresh token is
      * invalidated or the user/service is no longer valid (identity answers 401).
+     *
+     * Concurrent callers presenting the SAME refresh token are coalesced into a
+     * single network call: the first does the POST, the rest reuse its result for
+     * [refreshCoalesceMillis]. A stateless per-request session gate otherwise has
+     * every in-flight request independently refresh the same about-to-expire token,
+     * so one page load firing a dozen authenticated requests at once turns into a
+     * dozen identical refreshes. Coalescing collapses that burst to one call. The
+     * window is short so a revoked token is re-checked promptly, the monitor is per
+     * token so unrelated sessions never block each other, and errors are not cached
+     * (the next caller retries).
      */
-    fun refresh(refreshToken: String): RefreshResponse = post(
+    fun refresh(refreshToken: String): RefreshResponse {
+        if (refreshCoalesceMillis <= 0) return doRefresh(refreshToken)
+
+        cachedRefresh(refreshToken)?.let { return it }
+        val tokenLock = synchronized(refreshLock) {
+            cachedRefresh(refreshToken)?.let { return it }
+            refreshInflight.getOrPut(refreshToken) { Any() }
+        }
+        try {
+            synchronized(tokenLock) {
+                // Re-check: a concurrent caller may have refreshed while we waited.
+                cachedRefresh(refreshToken)?.let { return it }
+                val resp = doRefresh(refreshToken)
+                synchronized(refreshLock) {
+                    refreshCache[refreshToken] = clock() to resp
+                    pruneRefreshCacheLocked()
+                }
+                return resp
+            }
+        } finally {
+            // Drop the registry entry (success or failure) so it cannot accumulate;
+            // waiters already hold their own reference to the monitor.
+            synchronized(refreshLock) { refreshInflight.remove(refreshToken) }
+        }
+    }
+
+    /** A still-fresh cached refresh result for [refreshToken], or null. */
+    private fun cachedRefresh(refreshToken: String): RefreshResponse? =
+        synchronized(refreshLock) {
+            refreshCache[refreshToken]?.takeIf { clock() - it.first < refreshCoalesceMillis }?.second
+        }
+
+    /** Drop coalesce-cache entries older than the window. Holds [refreshLock]. */
+    private fun pruneRefreshCacheLocked() {
+        val cutoff = clock() - refreshCoalesceMillis
+        refreshCache.entries.removeAll { it.value.first < cutoff }
+    }
+
+    private fun doRefresh(refreshToken: String): RefreshResponse = post(
         "/auth/refresh",
         buildJsonObject { put("refresh_token", JsonPrimitive(refreshToken)) },
         RefreshResponse.serializer(),

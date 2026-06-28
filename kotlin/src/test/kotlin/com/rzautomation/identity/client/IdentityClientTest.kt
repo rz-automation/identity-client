@@ -166,4 +166,91 @@ class IdentityClientTest {
             clientWith(transport).discordStartUrl(),
         )
     }
+
+    // --- refresh coalescing ---
+
+    private fun refreshPosts(transport: FakeTransport) =
+        transport.postCalls.count { it.first.contains("/auth/refresh") }
+
+    @Test
+    fun `concurrent refresh of the same token coalesces to one call`() {
+        val transport = FakeTransport().apply {
+            onPost("/auth/refresh") {
+                HttpResult(200, """{"access_token":"a","expires_at":"t"}""")
+            }
+        }
+        val client = IdentityClient(TestSupport.config(), transport)
+
+        val n = 12
+        val barrier = java.util.concurrent.CyclicBarrier(n)
+        val results = java.util.Collections.synchronizedList(mutableListOf<RefreshResponse>())
+        val threads = (1..n).map {
+            kotlin.concurrent.thread {
+                barrier.await() // release all at once to maximise overlap
+                results.add(client.refresh("r"))
+            }
+        }
+        threads.forEach { it.join() }
+
+        assertEquals(n, results.size)
+        assertTrue(results.all { it.accessToken == "a" })
+        assertEquals(1, refreshPosts(transport)) // twelve callers, one network refresh
+    }
+
+    @Test
+    fun `refresh of different tokens does not coalesce`() {
+        var n = 0
+        val transport = FakeTransport().apply {
+            onPost("/auth/refresh") { n++; HttpResult(200, """{"access_token":"a$n","expires_at":"t"}""") }
+        }
+        val client = IdentityClient(TestSupport.config(), transport)
+        assertEquals("a1", client.refresh("r1").accessToken)
+        assertEquals("a2", client.refresh("r2").accessToken)
+        assertEquals(2, refreshPosts(transport)) // distinct tokens never share a refresh
+    }
+
+    @Test
+    fun `refresh caches within the window then refetches after it`() {
+        var n = 0
+        val transport = FakeTransport().apply {
+            onPost("/auth/refresh") { n++; HttpResult(200, """{"access_token":"a$n","expires_at":"t"}""") }
+        }
+        var now = 1_000L
+        val client = IdentityClient(
+            TestSupport.config(), transport, clock = { now }, refreshCoalesceMillis = 50,
+        )
+        assertEquals("a1", client.refresh("r").accessToken)
+        assertEquals("a1", client.refresh("r").accessToken) // within window: reuse
+        now = 1_100L                                         // window lapses
+        assertEquals("a2", client.refresh("r").accessToken) // fresh network call
+        assertEquals(2, refreshPosts(transport))
+    }
+
+    @Test
+    fun `refresh coalescing can be disabled`() {
+        var n = 0
+        val transport = FakeTransport().apply {
+            onPost("/auth/refresh") { n++; HttpResult(200, """{"access_token":"a$n","expires_at":"t"}""") }
+        }
+        val client = IdentityClient(TestSupport.config(), transport, refreshCoalesceMillis = 0)
+        client.refresh("r")
+        client.refresh("r")
+        assertEquals(2, refreshPosts(transport)) // disabled: each call hits identity
+    }
+
+    @Test
+    fun `a failed refresh is not cached`() {
+        var c = 0
+        val transport = FakeTransport().apply {
+            onPost("/auth/refresh") {
+                c++
+                if (c == 1) HttpResult(401, "") else HttpResult(200, """{"access_token":"a","expires_at":"t"}""")
+            }
+        }
+        val client = IdentityClient(TestSupport.config(), transport)
+        assertFailsWith<AuthRejected> { client.refresh("r") }
+        // The failure was not cached, so a later call actually retries identity.
+        assertEquals("a", client.refresh("r").accessToken)
+        assertEquals(2, refreshPosts(transport))
+    }
 }

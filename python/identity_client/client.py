@@ -102,6 +102,11 @@ class IdentityConfig:
     # JWKS cache controls (see module docstring).
     jwks_cache_ttl: float = 600.0
     jwks_min_refetch_interval: float = 60.0
+    # Refresh coalescing window (see IdentityClient.refresh). Concurrent refreshes
+    # of the same refresh token within this many seconds share one network call,
+    # so a page load that fires many authenticated requests at once does not
+    # multiply into one refresh each. Set to 0 to disable coalescing.
+    refresh_coalesce_seconds: float = 10.0
     service_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -243,6 +248,12 @@ class IdentityClient:
         self._providers: Optional[list[dict[str, Any]]] = None
         self._providers_at: float = 0.0
         self._providers_ttl: float = 3600.0
+        # Refresh coalescing state (see refresh): a short result cache keyed by
+        # refresh token, plus a per-token lock so concurrent callers of the same
+        # token serialise onto one network call. Different tokens never contend.
+        self._refresh_state_lock = threading.Lock()
+        self._refresh_locks: dict[str, threading.Lock] = {}
+        self._refresh_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def providers(self) -> list[dict[str, Any]]:
         """Discover this service's enabled login providers from ``/auth-providers``.
@@ -401,8 +412,63 @@ class IdentityClient:
         Returns ``{access_token, expires_at}``. Raises ``AuthRejected`` when the
         refresh token is invalidated or the user/service is no longer valid
         (identity answers 401).
+
+        Concurrent callers presenting the SAME refresh token are coalesced into a
+        single network call: the first does the POST, the rest reuse its result
+        for ``refresh_coalesce_seconds``. A stateless per-request session gate
+        otherwise has every in-flight request independently refresh the same
+        about-to-expire token, so one page load firing a dozen authenticated
+        requests at once turns into a dozen identical refreshes. Coalescing
+        collapses that burst to one call. The window is short so a revoked token is
+        re-checked promptly, and the lock is per token so unrelated sessions never
+        block each other. Errors are not cached (the next caller retries).
         """
-        return self._post("/auth/refresh", {"refresh_token": refresh_token})
+        window = self.config.refresh_coalesce_seconds
+        if window <= 0:
+            return self._post("/auth/refresh", {"refresh_token": refresh_token})
+
+        now = time.monotonic()
+        with self._refresh_state_lock:
+            hit = self._refresh_cache.get(refresh_token)
+            if hit is not None and (now - hit[0]) < window:
+                return hit[1]
+            token_lock = self._refresh_locks.get(refresh_token)
+            if token_lock is None:
+                token_lock = threading.Lock()
+                self._refresh_locks[refresh_token] = token_lock
+
+        try:
+            with token_lock:
+                # Re-check: a concurrent caller may have refreshed this token while
+                # we waited for the lock.
+                now = time.monotonic()
+                with self._refresh_state_lock:
+                    hit = self._refresh_cache.get(refresh_token)
+                    if hit is not None and (now - hit[0]) < window:
+                        return hit[1]
+                # We are the single caller that actually talks to identity.
+                result = self._post(
+                    "/auth/refresh", {"refresh_token": refresh_token}
+                )
+                with self._refresh_state_lock:
+                    self._refresh_cache[refresh_token] = (time.monotonic(), result)
+                    self._prune_refresh_cache_locked()
+                return result
+        finally:
+            # Drop the registry entry (success or failure) so it cannot accumulate;
+            # waiters already hold their own reference to the lock object, and later
+            # callers either hit the cache or mint a fresh lock.
+            with self._refresh_state_lock:
+                self._refresh_locks.pop(refresh_token, None)
+
+    def _prune_refresh_cache_locked(self) -> None:
+        """Drop refresh-coalesce entries older than the window. Called while
+        holding ``_refresh_state_lock``; keeps the cache bounded to tokens
+        refreshed within the last window."""
+        cutoff = time.monotonic() - self.config.refresh_coalesce_seconds
+        stale = [t for t, (ts, _) in self._refresh_cache.items() if ts < cutoff]
+        for t in stale:
+            del self._refresh_cache[t]
 
     def logout(self, refresh_token: str) -> None:
         """Best-effort revoke of *refresh_token* (POST /auth/logout).

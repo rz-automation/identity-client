@@ -135,6 +135,14 @@ Gate decision (`SessionPolicy.evaluate` in the Python SDK is the reference):
    a lost `is_admin`). Update `axp`/`adm`.
 3. Bump `seen` and re-issue the cookie.
 
+`IdentityClient.refresh` coalesces concurrent calls for the same refresh token into
+one network call (a short result cache keyed by the token, `refresh_coalesce_seconds`
+/ `refreshCoalesceMillis`, default 10s, 0 to disable). A page load fires many
+authenticated requests at once and the gate refreshes from each; without coalescing
+that multiplies into one `/auth/refresh` per request. Coalescing is a transport
+optimisation only -- it never changes the gate's deny/allow decision, and errors are
+never cached.
+
 The signing scheme of the cookie is the binding's own choice (each service signs
 with its own secret; sessions are never shared across services), so it is **not**
 part of this cross-language contract.

@@ -29,6 +29,14 @@ data class AuthResponse(
     val user: IdentityUser,
 )
 
+/** Body of the password-reset endpoints that answer with a generic ok. */
+@Serializable
+data class ResetAck(val ok: Boolean = true)
+
+/** Body of `/auth/password/reset/validate`. */
+@Serializable
+data class ResetValidity(val valid: Boolean)
+
 /** Body of a successful `/auth/refresh`. */
 @Serializable
 data class RefreshResponse(
@@ -182,6 +190,45 @@ class IdentityClient(
         "/auth/password/login",
         buildJsonObject { put("email", JsonPrimitive(email)); put("password", JsonPrimitive(password)) },
         AuthResponse.serializer(),
+    )
+
+    /**
+     * Start a password reset (POST /auth/password/reset/request). The consumer's
+     * backend proxies this from its "forgot password" form. Always returns a
+     * generic ack regardless of whether the address has an account (identity
+     * never reveals that); identity sends the reset email out of band. Throws
+     * [PasswordRejected] on an actionable 4xx (404 password not enabled, 429
+     * rate-limited), [AuthRejected] on 401, and [IdentityUnavailable] otherwise.
+     */
+    fun passwordResetRequest(email: String): ResetAck = postPassword(
+        "/auth/password/reset/request",
+        buildJsonObject { put("email", JsonPrimitive(email)) },
+        ResetAck.serializer(),
+    )
+
+    /**
+     * Check whether a reset token is still usable (POST
+     * /auth/password/reset/validate), so the consumer's reset page can show a
+     * clear dead-link state before asking for a new password. Throws
+     * [PasswordRejected] on 429, [AuthRejected] on 401, and
+     * [IdentityUnavailable] otherwise.
+     */
+    fun passwordResetValidate(token: String): ResetValidity = postPassword(
+        "/auth/password/reset/validate",
+        buildJsonObject { put("token", JsonPrimitive(token)) },
+        ResetValidity.serializer(),
+    )
+
+    /**
+     * Set a new password from a reset token (POST /auth/password/reset/confirm).
+     * Returns a generic ack. Throws [PasswordRejected] on an actionable 4xx
+     * (400 weak password or an expired/used/invalid token), [AuthRejected] on
+     * 401, and [IdentityUnavailable] otherwise.
+     */
+    fun passwordResetConfirm(token: String, password: String): ResetAck = postPassword(
+        "/auth/password/reset/confirm",
+        buildJsonObject { put("token", JsonPrimitive(token)); put("password", JsonPrimitive(password)) },
+        ResetAck.serializer(),
     )
 
     /**

@@ -3,6 +3,7 @@ package com.rzautomation.identity.client
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -87,6 +88,35 @@ class IdentityClientTest {
         assertFailsWith<AuthRejected> {
             clientWith(transport).passwordSignup("user@example.com", "pw")
         }
+    }
+
+    @Test
+    fun `password reset request returns the generic ack`() {
+        val transport = FakeTransport().apply {
+            onPost("/auth/password/reset/request") { HttpResult(200, """{"ok":true}""") }
+        }
+        assertTrue(clientWith(transport).passwordResetRequest("user@example.com").ok)
+    }
+
+    @Test
+    fun `password reset validate reports token usability`() {
+        val transport = FakeTransport().apply {
+            onPost("/auth/password/reset/validate") { HttpResult(200, """{"valid":false}""") }
+        }
+        assertFalse(clientWith(transport).passwordResetValidate("tok").valid)
+    }
+
+    @Test
+    fun `password reset confirm surfaces a weak password as PasswordRejected`() {
+        val transport = FakeTransport().apply {
+            onPost("/auth/password/reset/confirm") {
+                HttpResult(400, """{"detail":{"error":"Password must be at least 7 characters."}}""")
+            }
+        }
+        val ex = assertFailsWith<PasswordRejected> {
+            clientWith(transport).passwordResetConfirm("tok", "short")
+        }
+        assertEquals(400, ex.status)
     }
 
     @Test

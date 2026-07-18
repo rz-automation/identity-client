@@ -20,7 +20,7 @@ plugins {
 // exact same coordinate, so a consumer resolves identically online and offline.
 // JitPack overrides `version` with the git tag at publish time.
 group = "com.github.rz-automation"
-version = "0.13.0"
+version = "0.14.0"
 
 kotlin {
     jvmToolchain(17)

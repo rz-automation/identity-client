@@ -91,7 +91,8 @@ def whoami(user=Depends(user_required)):
 console: `/login` then refuses non-admins and a demotion ends the session. The
 session refreshes against identity when the access token goes stale and fails
 closed; lifetime is bounded by an idle timeout and an absolute cap, enforced from
-the cookie's own timestamps. Blocking identity calls run in a threadpool. Drive
+the cookie's own timestamps (pass `None` for either to opt out; with both off the
+session lives as long as its refresh token). Blocking identity calls run in a threadpool. Drive
 the whole flow in tests with `FakeIdentity`.
 
 ## Testing your integration

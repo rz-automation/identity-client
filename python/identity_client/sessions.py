@@ -50,6 +50,11 @@ class SessionPolicy:
     the ``is_admin`` claim ends the session (demotion kill-switch). With the
     default ``admin_only=False`` any valid identity account stays signed in and
     callers gate admin-only routes separately.
+
+    ``idle_timeout_seconds=None`` and ``absolute_lifetime_seconds=None`` each opt
+    out of that bound. With both ``None`` the session lives exactly as long as
+    its identity refresh token (a sliding window re-armed on every refresh),
+    which suits a low-sensitivity consumer such as a casual game.
     """
 
     def __init__(
@@ -57,7 +62,7 @@ class SessionPolicy:
         client: IdentityClient,
         *,
         idle_timeout_seconds: Optional[int] = 12 * 3600,
-        absolute_lifetime_seconds: int = 7 * _DAY,
+        absolute_lifetime_seconds: Optional[int] = 7 * _DAY,
         refresh_skew_seconds: int = 30,
         admin_only: bool = False,
     ) -> None:
@@ -81,13 +86,17 @@ class SessionPolicy:
         }
 
     def in_bounds(self, data: dict[str, Any]) -> bool:
-        """True iff the session still holds a refresh token and is within both
-        the absolute lifetime and (unless opted out) the idle timeout."""
+        """True iff the session still holds a refresh token and is within the
+        absolute lifetime and the idle timeout (each unless opted out)."""
         if not data.get("rt"):
             return False
         now = int(time.time())
-        if now - int(data.get("iat", 0)) >= self.absolute_lifetime_seconds:
-            return False
+        # absolute_lifetime_seconds=None opts out of the login-age cap: the
+        # session then lives until the refresh token lapses (identity's sliding
+        # window) or, if kept, the idle timeout fires.
+        if self.absolute_lifetime_seconds is not None:
+            if now - int(data.get("iat", 0)) >= self.absolute_lifetime_seconds:
+                return False
         # idle_timeout_seconds=None opts out of the idle check entirely: the
         # session then lives until the absolute lifetime or the refresh token
         # lapses. Suits low-sensitivity consumers; sensitive ones keep the default.

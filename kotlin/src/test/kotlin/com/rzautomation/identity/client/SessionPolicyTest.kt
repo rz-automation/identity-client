@@ -54,6 +54,14 @@ class SessionPolicyTest {
     }
 
     @Test
+    fun `absoluteLifetimeSeconds null keeps a years-old login`() {
+        val (client, _) = clientReturningRefreshToken()
+        val policy = SessionPolicy(client, absoluteLifetimeSeconds = null, clock = { NOW })
+        val old = session(axp = NOW + 10_000, iat = NOW - 3 * 365 * 24 * 3600)
+        assertIs<SessionDecision.Authenticated>(policy.evaluate(old))
+    }
+
+    @Test
     fun `an idle session is denied`() {
         val (client, _) = clientReturningRefreshToken()
         val policy = SessionPolicy(client, clock = { NOW })

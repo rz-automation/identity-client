@@ -71,6 +71,9 @@ from .sessions import SessionPolicy
 _NO_STORE = {"Cache-Control": "no-store"}
 
 _DAY = 24 * 3600
+# Browsers clamp cookie Max-Age to 400 days (RFC 6265bis); used when a session
+# manager has no absolute lifetime of its own.
+_BROWSER_COOKIE_MAX_AGE = 400 * _DAY
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,11 @@ class IdentitySessions:
     session (demotion kill-switch). With the default ``admin_only=False`` any
     valid identity account may sign in, and you gate admin-only routes with
     ``require_admin`` instead.
+
+    ``idle_timeout_seconds=None`` / ``absolute_lifetime_seconds=None`` opt out of
+    those bounds (see :class:`~identity_client.sessions.SessionPolicy`); with no
+    absolute lifetime the cookie is issued with the longest ``Max-Age`` browsers
+    honour and the session lives as long as its refresh token.
     """
 
     def __init__(
@@ -138,7 +146,7 @@ class IdentitySessions:
         cookie_secure: bool = True,
         salt: str = "identity-session",
         idle_timeout_seconds: Optional[int] = 12 * 3600,
-        absolute_lifetime_seconds: int = 7 * _DAY,
+        absolute_lifetime_seconds: Optional[int] = 7 * _DAY,
         refresh_skew_seconds: int = 30,
         admin_only: bool = False,
     ) -> None:
@@ -187,6 +195,19 @@ class IdentitySessions:
 
     # -- cookie read/write --
 
+    @property
+    def cookie_max_age(self) -> int:
+        """The ``Max-Age`` written on the session cookie.
+
+        The absolute lifetime when one is set. Without one the session is bounded
+        only by identity's refresh token, so the cookie gets the longest lifetime
+        browsers honour (they clamp Max-Age to ~400 days, RFC 6265bis); every
+        authenticated request re-issues the cookie, restarting that clock.
+        """
+        if self.absolute_lifetime_seconds is not None:
+            return self.absolute_lifetime_seconds
+        return _BROWSER_COOKIE_MAX_AGE
+
     def new_session(self, claims: dict[str, Any], refresh_token: str) -> dict[str, Any]:
         """Build a fresh session payload from a verified access token's claims."""
         return self._policy.new_session(claims, refresh_token)
@@ -196,7 +217,7 @@ class IdentitySessions:
         response.set_cookie(
             self.cookie_name,
             self._serializer.dumps(data),
-            max_age=self.absolute_lifetime_seconds,
+            max_age=self.cookie_max_age,
             httponly=True,
             secure=self.cookie_secure,
             samesite="lax",
@@ -212,6 +233,8 @@ class IdentitySessions:
         if not token:
             return None
         try:
+            # max_age=None (no absolute lifetime) skips the signing-age check;
+            # the policy's bounds and the refresh token still gate the session.
             data = self._serializer.loads(token, max_age=self.absolute_lifetime_seconds)
         except (BadSignature, SignatureExpired):
             return None

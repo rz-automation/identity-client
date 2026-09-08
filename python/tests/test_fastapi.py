@@ -32,6 +32,7 @@ def _build(
     *,
     admin_only: bool = False,
     idle_timeout_seconds=12 * 3600,
+    absolute_lifetime_seconds=7 * 24 * 3600,
 ) -> TestClient:
     sessions = IdentitySessions(
         identity,
@@ -39,6 +40,7 @@ def _build(
         cookie_secure=False,  # TestClient speaks http://
         admin_only=admin_only,
         idle_timeout_seconds=idle_timeout_seconds,
+        absolute_lifetime_seconds=absolute_lifetime_seconds,
     )
     app = FastAPI()
     app.include_router(auth_router(sessions), prefix="/api/auth")
@@ -377,6 +379,31 @@ def test_idle_timeout_none_still_enforces_absolute_lifetime():
     client = _build(FakeIdentity(), idle_timeout_seconds=None)
     _seed(client, iat=int(time.time()) - 7 * 24 * 3600 - 10)
     assert client.get(_GATED_USER).status_code == 401
+
+
+def test_absolute_lifetime_none_keeps_old_login():
+    # Opting out of the absolute cap: a login from years ago is still admitted
+    # (the signed cookie's age is no longer checked either).
+    client = _build(FakeIdentity(), idle_timeout_seconds=None, absolute_lifetime_seconds=None)
+    _seed(client, iat=int(time.time()) - 3 * 365 * 24 * 3600)
+    assert client.get(_GATED_USER).status_code == 200
+
+
+def test_absolute_lifetime_none_issues_browser_max_cookie():
+    # With no cap of its own the cookie carries the longest Max-Age browsers
+    # honour (400 days), re-stamped on every authenticated request.
+    client = _build(FakeIdentity(), idle_timeout_seconds=None, absolute_lifetime_seconds=None)
+    _seed(client)
+    resp = client.get(_GATED_USER)
+    assert resp.status_code == 200
+    set_cookie = resp.headers["set-cookie"]
+    assert "Max-Age=%d" % (400 * 24 * 3600) in set_cookie
+    assert client._sessions.cookie_max_age == 400 * 24 * 3600
+
+
+def test_absolute_lifetime_set_is_the_cookie_max_age():
+    client = _build(FakeIdentity())
+    assert client._sessions.cookie_max_age == 7 * 24 * 3600
 
 
 # --- logout + session report -------------------------------------------------

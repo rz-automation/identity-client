@@ -45,13 +45,15 @@ sealed interface SessionDecision {
  *
  * @param idleTimeoutSeconds null opts out of the idle check entirely (the session
  *   then lives until the absolute lifetime or the refresh token lapses).
+ * @param absoluteLifetimeSeconds null opts out of the login-age cap (the session
+ *   then lives until the refresh token lapses or, if kept, the idle timeout).
  * @param adminOnly tightens the policy for admin consoles: a refresh that loses
  *   `is_admin` ends the session (a demotion kill-switch).
  */
 class SessionPolicy(
     private val client: IdentityClient,
     private val idleTimeoutSeconds: Long? = 12 * 3600,
-    private val absoluteLifetimeSeconds: Long = 7 * 24 * 3600,
+    private val absoluteLifetimeSeconds: Long? = 7 * 24 * 3600,
     private val refreshSkewSeconds: Long = 30,
     private val adminOnly: Boolean = false,
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
@@ -72,12 +74,12 @@ class SessionPolicy(
         )
     }
 
-    /** True iff the session still holds a refresh token and is within both the
-     *  absolute lifetime and (unless opted out) the idle timeout. */
+    /** True iff the session still holds a refresh token and is within the
+     *  absolute lifetime and the idle timeout (each unless opted out). */
     fun inBounds(session: IdentitySession): Boolean {
         if (session.rt.isEmpty()) return false
         val now = clock()
-        if (now - session.iat >= absoluteLifetimeSeconds) return false
+        absoluteLifetimeSeconds?.let { if (now - session.iat >= it) return false }
         idleTimeoutSeconds?.let { if (now - session.seen >= it) return false }
         return true
     }

@@ -81,6 +81,21 @@ def test_out_of_bounds_absolute_lifetime():
     assert pol.evaluate(data) == (False, None)
 
 
+def test_absolute_lifetime_opt_out():
+    # absolute_lifetime_seconds=None: a session logged in years ago is still in
+    # bounds; only the refresh token (and idle, if kept) can end it.
+    pol = _policy(FakeIdentity(), absolute_lifetime_seconds=None)
+    data = {"rt": "RT", "iat": int(time.time()) - 3 * 365 * 86400, "seen": int(time.time()), "axp": int(time.time()) + 600}
+    authed, _ = pol.evaluate(data)
+    assert authed is True
+
+
+def test_both_bounds_opted_out_still_needs_refresh_token():
+    pol = _policy(FakeIdentity(), idle_timeout_seconds=None, absolute_lifetime_seconds=None)
+    data = {"rt": "", "iat": 0, "seen": 0, "axp": int(time.time()) + 600}
+    assert pol.evaluate(data) == (False, None)
+
+
 def test_idle_timeout_opt_out():
     # idle_timeout_seconds=None means only the absolute lifetime bounds it.
     pol = _policy(FakeIdentity(), idle_timeout_seconds=None)

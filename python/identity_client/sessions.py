@@ -53,8 +53,8 @@ class SessionPolicy:
 
     ``idle_timeout_seconds=None`` and ``absolute_lifetime_seconds=None`` each opt
     out of that bound. With both ``None`` the session lives exactly as long as
-    its identity refresh token (a sliding window re-armed on every refresh),
-    which suits a low-sensitivity consumer such as a casual game.
+    its identity refresh token, which never expires by age (only logout, revoke,
+    disable or delete end it); suits a low-sensitivity consumer such as a game.
     """
 
     def __init__(
@@ -92,8 +92,8 @@ class SessionPolicy:
             return False
         now = int(time.time())
         # absolute_lifetime_seconds=None opts out of the login-age cap: the
-        # session then lives until the refresh token lapses (identity's sliding
-        # window) or, if kept, the idle timeout fires.
+        # session then lives until the refresh token is revoked or, if kept, the
+        # idle timeout fires.
         if self.absolute_lifetime_seconds is not None:
             if now - int(data.get("iat", 0)) >= self.absolute_lifetime_seconds:
                 return False

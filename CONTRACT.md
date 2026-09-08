@@ -131,7 +131,8 @@ Gate decision (`SessionPolicy.evaluate` in the Python SDK is the reference):
 1. No valid cookie, or out of bounds -> deny. Bounds: `rt` present; `now - iat <
    absolute_lifetime`; and `now - seen < idle_timeout`. A consumer may opt out of
    either bound (`None`/`null`); with both opted out the session lives exactly as
-   long as its refresh token (identity's sliding window, §5).
+   long as its refresh token, which never expires by age (§5): only logout,
+   admin revoke, account disable or delete end it.
 2. If `now >= axp - refresh_skew`, refresh: call `/auth/refresh`, verify the new
    access token (§4), and **fail closed** on any error (or, in admin-only mode, on
    a lost `is_admin`). Update `axp`/`adm`.

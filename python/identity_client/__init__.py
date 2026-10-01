@@ -4,7 +4,8 @@ Public API:
 
     from identity_client import (
         IdentityClient, IdentityConfig, AccessTokenVerifier,
-        IdentityError, AuthRejected, IdentityUnavailable, is_admin_claim,
+        IdentityError, AuthRejected, CredentialRejected, IdentityUnavailable,
+        is_admin_claim,
         SessionPolicy,
     )
 
@@ -24,6 +25,7 @@ It is not imported here so the core stays dependency-light.
 from .client import (
     AccessTokenVerifier,
     AuthRejected,
+    CredentialRejected,
     IdentityClient,
     IdentityConfig,
     IdentityError,
@@ -33,7 +35,7 @@ from .client import (
 )
 from .sessions import SessionPolicy
 
-__version__ = "0.11.0"
+__version__ = "0.16.0"
 
 __all__ = [
     "IdentityClient",
@@ -41,6 +43,7 @@ __all__ = [
     "AccessTokenVerifier",
     "IdentityError",
     "AuthRejected",
+    "CredentialRejected",
     "IdentityUnavailable",
     "PasswordRejected",
     "is_admin_claim",

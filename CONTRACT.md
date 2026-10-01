@@ -35,7 +35,11 @@ server-side only and never reaches a browser.
 
 All require the `Authorization: Bearer` credential. None emit CORS. JSON in/out.
 On failure: `401` means reject (bad credential/token); any other `>= 400` or a
-non-JSON body means treat as unavailable. Both deny (see §5).
+non-JSON body means treat as unavailable. Both deny (see §5). A `401` from the
+credential gate carries `detail.code = "invalid_credential"` (this service's own
+credential is missing, wrong or inactive); `/auth/refresh` rejecting the token
+carries `"refresh_rejected"`. The Python client raises `CredentialRejected` (a
+subclass of `AuthRejected`) for the first.
 
 | Method | Path | Request | Response |
 |--------|------|---------|----------|
@@ -105,7 +109,9 @@ cached key if present, else reject.
 
 Any uncertainty denies. A `401` denies (the subject is not/no longer valid). An
 outage, timeout, `5xx`, or malformed body also denies — it just is not a statement
-about the subject. A client should distinguish the two only for logging.
+about the subject. A `401` labelled `invalid_credential` is not one either: it is
+the service's own ops fault. A client may treat it as unavailable (deny this
+request, keep the user's session) rather than ending sessions.
 
 ---
 

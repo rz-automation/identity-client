@@ -18,6 +18,7 @@ import requests
 from identity_client import (
     AccessTokenVerifier,
     AuthRejected,
+    CredentialRejected,
     IdentityClient,
     IdentityConfig,
     IdentityUnavailable,
@@ -192,6 +193,39 @@ def test_sign_in_401_raises_auth_rejected():
     http.queue_post(FakeResp(status=401))
     with pytest.raises(AuthRejected):
         _client(http).sign_in("google", "bad")
+
+
+def test_refresh_401_labelled_invalid_credential_raises_credential_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Invalid credential.", "code": "invalid_credential"}}, status=401))
+    with pytest.raises(CredentialRejected) as exc:
+        _client(http).refresh("rt")
+    assert isinstance(exc.value, AuthRejected)  # existing handlers still deny
+
+
+def test_refresh_401_for_the_token_stays_auth_rejected():
+    for body in ({"detail": {"error": "Invalid or expired refresh token.", "code": "refresh_rejected"}},
+                 {"detail": {"error": "Invalid credential."}},  # an identity older than the label
+                 None):
+        http = FakeHTTP()
+        http.queue_post(FakeResp(body, status=401))
+        with pytest.raises(AuthRejected) as exc:
+            _client(http).refresh("rt")
+        assert not isinstance(exc.value, CredentialRejected)
+
+
+def test_every_401_path_labels_a_bad_credential():
+    bad = {"detail": {"error": "Invalid credential.", "code": "invalid_credential"}}
+    calls = [
+        lambda c: c.sign_in("google", "t"),
+        lambda c: c.password_login("a@example.com", "pw"),
+        lambda c: c.delete_account("u1"),
+    ]
+    for call in calls:
+        http = FakeHTTP()
+        http.queue_post(FakeResp(bad, status=401))
+        with pytest.raises(CredentialRejected):
+            call(_client(http))
 
 
 def test_refresh_5xx_raises_unavailable():

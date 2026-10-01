@@ -64,6 +64,18 @@ class AuthRejected(IdentityError):
     authorised user."""
 
 
+class CredentialRejected(AuthRejected):
+    """identity rejected *this service's own credential* (a 401 labelled
+    ``invalid_credential``: missing, wrong, rotated, or the service inactive).
+
+    A subclass of ``AuthRejected``, so code that already catches that keeps
+    denying exactly as before. It is an ops fault, not a statement about the
+    user, so a consumer that wants to keep its users signed in through a
+    credential mistake catches this first and treats it as unavailable.
+    An identity older than the label answers a plain 401, which stays
+    ``AuthRejected``."""
+
+
 class IdentityUnavailable(IdentityError):
     """identity could not be reached or answered with a non-auth error
     (timeout, connection error, 5xx, malformed body). Per the fail-closed rule
@@ -530,7 +542,7 @@ class IdentityClient:
         if resp.status_code in (200, 404):
             return
         if resp.status_code == 401:
-            raise AuthRejected(f"identity {path} rejected the request (401)")
+            raise _rejection(resp, path)
         raise IdentityUnavailable(f"identity {path} returned {resp.status_code}")
 
     def verify(self, access_token: str) -> dict[str, Any]:
@@ -576,7 +588,7 @@ class IdentityClient:
                     f"identity {path} returned a non-JSON body"
                 ) from exc
         if resp.status_code == 401:
-            raise AuthRejected(f"identity {path} rejected (401)")
+            raise _rejection(resp, path)
         if resp.status_code in (400, 404, 409, 429):
             msg = "request rejected"
             try:
@@ -596,7 +608,7 @@ class IdentityClient:
         subject).
         """
         if resp.status_code == 401:
-            raise AuthRejected(f"identity {path} rejected the request (401)")
+            raise _rejection(resp, path)
         if resp.status_code >= 400:
             raise IdentityUnavailable(f"identity {path} returned {resp.status_code}")
         try:
@@ -605,6 +617,21 @@ class IdentityClient:
             raise IdentityUnavailable(
                 f"identity {path} returned a non-JSON body"
             ) from exc
+
+
+def _rejection(resp: Any, path: str) -> AuthRejected:
+    """The error for a 401: ``CredentialRejected`` when identity labels it a
+    bad service credential, else ``AuthRejected`` (the user or token)."""
+    code = None
+    try:
+        detail = resp.json().get("detail")
+        if isinstance(detail, dict):
+            code = detail.get("code")
+    except (ValueError, AttributeError):
+        pass
+    if code == "invalid_credential":
+        return CredentialRejected(f"identity {path} rejected this service's credential (401)")
+    return AuthRejected(f"identity {path} rejected the request (401)")
 
 
 def is_admin_claim(claims: dict[str, Any]) -> bool:

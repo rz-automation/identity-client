@@ -76,6 +76,17 @@ class CredentialRejected(AuthRejected):
     ``AuthRejected``."""
 
 
+class RefreshRejected(AuthRejected):
+    """identity positively rejected *the refresh token* (a 401 labelled
+    ``refresh_rejected``: revoked, the user disabled or deleted). The one
+    definite statement that this user's session is over.
+
+    A subclass of ``AuthRejected``, so existing handlers deny as before. A
+    consumer that ends sessions only on identity's definite "no" catches this,
+    and treats any other ``AuthRejected`` (an unlabelled 401: a proxy, a
+    misrouted URL, an identity older than the label) as unavailable."""
+
+
 class IdentityUnavailable(IdentityError):
     """identity could not be reached or answered with a non-auth error
     (timeout, connection error, 5xx, malformed body). Per the fail-closed rule
@@ -648,7 +659,8 @@ class IdentityClient:
 
 def _rejection(resp: Any, path: str) -> AuthRejected:
     """The error for a 401: ``CredentialRejected`` when identity labels it a
-    bad service credential, else ``AuthRejected`` (the user or token)."""
+    bad service credential, ``RefreshRejected`` when it labels the refresh
+    token rejected, else plain ``AuthRejected`` (unlabelled)."""
     code = None
     try:
         detail = resp.json().get("detail")
@@ -658,6 +670,8 @@ def _rejection(resp: Any, path: str) -> AuthRejected:
         pass
     if code == "invalid_credential":
         return CredentialRejected(f"identity {path} rejected this service's credential (401)")
+    if code == "refresh_rejected":
+        return RefreshRejected(f"identity {path} rejected the refresh token (401)")
     return AuthRejected(f"identity {path} rejected the request (401)")
 
 

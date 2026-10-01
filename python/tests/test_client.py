@@ -23,6 +23,7 @@ from identity_client import (
     IdentityConfig,
     IdentityUnavailable,
     PasswordRejected,
+    RefreshRejected,
     is_admin_claim,
 )
 from identity_client.testing import (
@@ -203,15 +204,22 @@ def test_refresh_401_labelled_invalid_credential_raises_credential_rejected():
     assert isinstance(exc.value, AuthRejected)  # existing handlers still deny
 
 
-def test_refresh_401_for_the_token_stays_auth_rejected():
-    for body in ({"detail": {"error": "Invalid or expired refresh token.", "code": "refresh_rejected"}},
-                 {"detail": {"error": "Invalid credential."}},  # an identity older than the label
-                 None):
+def test_refresh_401_labelled_refresh_rejected_raises_refresh_rejected():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "Invalid refresh token.", "code": "refresh_rejected"}}, status=401))
+    with pytest.raises(RefreshRejected) as exc:
+        _client(http).refresh("rt")
+    assert isinstance(exc.value, AuthRejected)  # existing handlers still deny
+
+
+def test_an_unlabelled_401_is_plain_auth_rejected():
+    for body in ({"detail": {"error": "Invalid credential."}},  # an identity older than the labels
+                 None):  # a proxy's 401
         http = FakeHTTP()
         http.queue_post(FakeResp(body, status=401))
         with pytest.raises(AuthRejected) as exc:
             _client(http).refresh("rt")
-        assert not isinstance(exc.value, CredentialRejected)
+        assert not isinstance(exc.value, (CredentialRejected, RefreshRejected))
 
 
 def test_every_401_path_labels_a_bad_credential():

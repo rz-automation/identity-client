@@ -4,7 +4,8 @@ Public API:
 
     from identity_client import (
         IdentityClient, IdentityConfig, AccessTokenVerifier,
-        IdentityError, AuthRejected, CredentialRejected, IdentityUnavailable,
+        IdentityError, AuthRejected, CredentialRejected, RefreshRejected,
+        IdentityUnavailable,
         is_admin_claim,
         SessionPolicy,
     )
@@ -31,11 +32,12 @@ from .client import (
     IdentityError,
     IdentityUnavailable,
     PasswordRejected,
+    RefreshRejected,
     is_admin_claim,
 )
 from .sessions import SessionPolicy
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 __all__ = [
     "IdentityClient",
@@ -44,6 +46,7 @@ __all__ = [
     "IdentityError",
     "AuthRejected",
     "CredentialRejected",
+    "RefreshRejected",
     "IdentityUnavailable",
     "PasswordRejected",
     "is_admin_claim",

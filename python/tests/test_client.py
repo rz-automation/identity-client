@@ -228,6 +228,33 @@ def test_every_401_path_labels_a_bad_credential():
             call(_client(http))
 
 
+def test_revoke_returns_only_when_identity_confirms():
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"ok": True}, status=200))
+    _client(http).revoke("rt")  # confirmed
+
+    for resp, exc in (
+        (FakeResp({"detail": {"error": "x", "code": "invalid_credential"}}, status=401), CredentialRejected),
+        (FakeResp(None, status=503), IdentityUnavailable),
+        (FakeResp(None, status=404), IdentityUnavailable),
+    ):
+        http = FakeHTTP()
+        http.queue_post(resp)
+        with pytest.raises(exc):
+            _client(http).revoke("rt")
+
+
+def test_revoke_unreachable_raises_unavailable():
+    class Down:
+        def post(self, *a, **k):
+            raise requests.ConnectionError("down")
+
+    client = _client(FakeHTTP())
+    client._session = Down()
+    with pytest.raises(IdentityUnavailable):
+        client.revoke("rt")
+
+
 def test_refresh_5xx_raises_unavailable():
     http = FakeHTTP()
     http.queue_post(FakeResp(status=503))

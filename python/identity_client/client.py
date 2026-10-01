@@ -510,6 +510,33 @@ class IdentityClient:
         except requests.RequestException:
             pass
 
+    def revoke(self, refresh_token: str) -> None:
+        """Revoke *refresh_token* (POST /auth/logout), confirmed.
+
+        Unlike :meth:`logout`, which never raises so a sign-out can always tear
+        the local session down, this tells the caller whether identity actually
+        has: it returns only on a 2xx (identity answers 200 for a token it no
+        longer knows, too: nothing is left to revoke). It raises
+        ``CredentialRejected`` when identity refused this service's credential,
+        and ``IdentityUnavailable`` for anything else (unreachable, 5xx, any
+        other status), so a caller can queue the revoke and retry it.
+        """
+        path = "/auth/logout"
+        try:
+            resp = self._session.post(
+                f"{self.config.base_url}{path}",
+                headers=self.config._auth_header,
+                json={"refresh_token": refresh_token},
+                timeout=self.config.request_timeout,
+            )
+        except requests.RequestException as exc:
+            raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
+        if 200 <= resp.status_code < 300:
+            return
+        if resp.status_code == 401:
+            raise _rejection(resp, path)
+        raise IdentityUnavailable(f"identity {path} returned {resp.status_code}")
+
     def delete_account(self, user_id: str) -> None:
         """GDPR-delete *user_id* in this service's realm.
 

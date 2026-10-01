@@ -64,6 +64,8 @@ class FakeIdentity:
         # lets a test force a failure (AuthRejected / IdentityUnavailable).
         self.delete_calls: list[str] = []
         self.delete_exc: Optional[Exception] = None
+        # Confirmed-revoke stand-in (``revoke``): set to force a failure.
+        self.revoke_exc: Optional[Exception] = None
         # Password-reset stand-ins. ``reset_valid`` drives validate's result.
         self.reset_calls: list[tuple[str, str]] = []
         self.reset_valid: bool = True
@@ -125,6 +127,13 @@ class FakeIdentity:
         return {"access_token": "AT2", "expires_at": "x"}
 
     def logout(self, refresh_token: str) -> None:
+        self.logout_calls.append(refresh_token)
+
+    def revoke(self, refresh_token: str) -> None:
+        """The confirmed revoke: records like ``logout``; ``revoke_exc`` makes it
+        fail (``IdentityUnavailable`` / ``CredentialRejected``)."""
+        if self.revoke_exc is not None:
+            raise self.revoke_exc
         self.logout_calls.append(refresh_token)
 
     def delete_account(self, user_id: str) -> None:

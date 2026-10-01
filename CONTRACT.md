@@ -39,7 +39,10 @@ non-JSON body means treat as unavailable. Both deny (see §5). A `401` from the
 credential gate carries `detail.code = "invalid_credential"` (this service's own
 credential is missing, wrong or inactive); `/auth/refresh` rejecting the token
 carries `"refresh_rejected"`. The Python client raises `CredentialRejected` (a
-subclass of `AuthRejected`) for the first.
+subclass of `AuthRejected`) for the first. `/auth/logout` answers 200 for any token (a
+gone one too) and 401 only for a bad credential; the Python client's `logout`
+is best-effort and never raises, while `revoke` returns only on a 2xx and
+raises otherwise, for a caller that must know the token is gone.
 
 | Method | Path | Request | Response |
 |--------|------|---------|----------|

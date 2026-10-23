@@ -47,6 +47,30 @@ class IdentityClientTest {
     }
 
     @Test
+    fun `signIn surfaces the 409 email conflict as PasswordRejected`() {
+        for ((provider, path) in listOf("google" to "/auth/google", "discord" to "/auth/discord/exchange")) {
+            val transport = FakeTransport().apply {
+                onPost(path) {
+                    HttpResult(409, """{"detail":{"error":"This email is registered with a password."}}""")
+                }
+            }
+            val ex = assertFailsWith<PasswordRejected> { clientWith(transport).signIn(provider, "x") }
+            assertEquals(409, ex.status)
+            assertEquals("This email is registered with a password.", ex.message)
+        }
+    }
+
+    @Test
+    fun `signIn keeps other 4xx as IdentityUnavailable`() {
+        for (status in listOf(400, 404, 429)) {
+            val transport = FakeTransport().apply {
+                onPost("/auth/google") { HttpResult(status, """{"detail":{"error":"nope"}}""") }
+            }
+            assertFailsWith<IdentityUnavailable> { clientWith(transport).signIn("google", "x") }
+        }
+    }
+
+    @Test
     fun `non-JSON success body maps to IdentityUnavailable`() {
         val transport = FakeTransport().apply {
             onPost("/auth/refresh") { HttpResult(200, "not json") }

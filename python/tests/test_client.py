@@ -196,6 +196,26 @@ def test_sign_in_401_raises_auth_rejected():
         _client(http).sign_in("google", "bad")
 
 
+@pytest.mark.parametrize("provider", ["google", "discord"])
+def test_sign_in_409_email_conflict_raises_password_rejected(provider):
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "This email is registered with a "
+                                         "password. Sign in with your password instead."}},
+                             status=409))
+    with pytest.raises(PasswordRejected) as exc:
+        _client(http).sign_in(provider, "token")
+    assert exc.value.status == 409
+    assert exc.value.message.startswith("This email is registered with a password.")
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500])
+def test_sign_in_other_errors_stay_unavailable(status):
+    http = FakeHTTP()
+    http.queue_post(FakeResp({"detail": {"error": "nope"}}, status=status))
+    with pytest.raises(IdentityUnavailable):
+        _client(http).sign_in("google", "token")
+
+
 def test_refresh_401_labelled_invalid_credential_raises_credential_rejected():
     http = FakeHTTP()
     http.queue_post(FakeResp({"detail": {"error": "Invalid credential.", "code": "invalid_credential"}}, status=401))

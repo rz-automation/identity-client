@@ -23,9 +23,10 @@ class AuthRejected(message: String, cause: Throwable? = null) : IdentityExceptio
 class IdentityUnavailable(message: String, cause: Throwable? = null) : IdentityException(message, cause)
 
 /**
- * identity rejected an email+password signup/login with an *actionable* 4xx
- * (400 weak password, 409 email taken, 404 password not enabled, 429
- * rate-limited). Unlike the generic [IdentityUnavailable] collapse, this carries
+ * identity refused with an *actionable* 4xx: on email+password, 400 weak
+ * password, 409 email taken, 404 password not enabled, 429 rate-limited; on a
+ * Google or Discord [IdentityClient.signIn], 409 when the email is held by an
+ * unverified password account (sign in with the password instead). Unlike the generic [IdentityUnavailable] collapse, this carries
  * the precise [status] and a human [message] so the caller can show the right
  * thing to the user.
  */

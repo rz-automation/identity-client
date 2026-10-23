@@ -94,16 +94,23 @@ class IdentityUnavailable(IdentityError):
 
 
 class PasswordRejected(IdentityError):
-    """identity rejected an email+password signup/login with an *actionable*
-    4xx (400 weak password, 409 email taken, 404 password not enabled, 429
-    rate-limited). Unlike the generic ``IdentityUnavailable`` collapse, this
-    carries the precise ``.status`` and a human ``.message`` so the caller can
-    show the right thing to the user."""
+    """identity refused with an *actionable* 4xx: on email+password, 400 weak
+    password, 409 email taken, 404 password not enabled, 429 rate-limited; on
+    a Google or Discord ``sign_in``, 409 when the email is held by an
+    unverified password account (sign in with the password instead). Unlike
+    the generic ``IdentityUnavailable`` collapse, this carries the precise
+    ``.status`` and a human ``.message`` so the caller can show the right
+    thing to the user."""
 
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+# The statuses each endpoint family answers with a refusal the user can act on.
+_PASSWORD_ACTIONABLE = (400, 404, 409, 429)
+_SIGN_IN_ACTIONABLE = (409,)
 
 
 # --- config ------------------------------------------------------------------
@@ -355,12 +362,18 @@ class IdentityClient:
 
         Returns the identity response body
         (``access_token``, ``refresh_token``, ``expires_at``, ``user``). Raises
-        ``ValueError`` for an unknown provider.
+        ``PasswordRejected`` (status 409, identity's message) when the email is
+        held by an unverified password account, so the caller can tell the user
+        to sign in with their password; ``AuthRejected`` on 401;
+        ``IdentityUnavailable`` otherwise; ``ValueError`` for an unknown
+        provider.
         """
         if provider == "google":
-            return self._post("/auth/google", {"google_id_token": credential})
+            return self._post_actionable("/auth/google", {"google_id_token": credential},
+                                         _SIGN_IN_ACTIONABLE)
         if provider == "discord":
-            return self._post("/auth/discord/exchange", {"code": credential})
+            return self._post_actionable("/auth/discord/exchange", {"code": credential},
+                                         _SIGN_IN_ACTIONABLE)
         raise ValueError(f"unknown provider {provider!r}")
 
     def password_signup(self, email: str, password: str) -> dict[str, Any]:
@@ -374,7 +387,7 @@ class IdentityClient:
         409 email taken, 404 password not enabled for the service),
         ``AuthRejected`` on 401, and ``IdentityUnavailable`` otherwise.
         """
-        return self._post_password(
+        return self._post_actionable(
             "/auth/password/signup", {"email": email, "password": password}
         )
 
@@ -388,7 +401,7 @@ class IdentityClient:
         rate-limited), ``AuthRejected`` on 401 (wrong/unknown — generic on
         purpose), and ``IdentityUnavailable`` otherwise.
         """
-        return self._post_password(
+        return self._post_actionable(
             "/auth/password/login", {"email": email, "password": password}
         )
 
@@ -402,7 +415,7 @@ class IdentityClient:
         (404 password not enabled, 429 rate-limited), ``AuthRejected`` on 401,
         and ``IdentityUnavailable`` otherwise.
         """
-        return self._post_password(
+        return self._post_actionable(
             "/auth/password/reset/request", {"email": email}
         )
 
@@ -413,7 +426,7 @@ class IdentityClient:
         new password. Raises ``PasswordRejected`` on 429, ``AuthRejected`` on
         401, ``IdentityUnavailable`` otherwise.
         """
-        return self._post_password(
+        return self._post_actionable(
             "/auth/password/reset/validate", {"token": token}
         )
 
@@ -426,7 +439,7 @@ class IdentityClient:
         expired/used/invalid token), ``AuthRejected`` on 401, and
         ``IdentityUnavailable`` otherwise.
         """
-        return self._post_password(
+        return self._post_actionable(
             "/auth/password/reset/confirm",
             {"token": token, "password": password},
         )
@@ -601,13 +614,14 @@ class IdentityClient:
             raise IdentityUnavailable(f"identity {path} unreachable: {exc}") from exc
         return self._parse(resp, path)
 
-    def _post_password(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        """POST to a password endpoint, mapping statuses precisely.
+    def _post_actionable(self, path: str, body: dict[str, Any],
+                         actionable: tuple[int, ...] = _PASSWORD_ACTIONABLE) -> dict[str, Any]:
+        """POST to an endpoint whose refusals the user can act on.
 
         Unlike ``_parse`` (which collapses every non-401 >=400 to
-        ``IdentityUnavailable``), this preserves the actionable 4xx as a
-        ``PasswordRejected`` carrying the status + the ``detail.error`` message,
-        so the caller can show the user why.
+        ``IdentityUnavailable``), this preserves each status in *actionable* as
+        a ``PasswordRejected`` carrying the status + the ``detail.error``
+        message, so the caller can show the user why.
         """
         try:
             resp = self._session.post(
@@ -627,7 +641,7 @@ class IdentityClient:
                 ) from exc
         if resp.status_code == 401:
             raise _rejection(resp, path)
-        if resp.status_code in (400, 404, 409, 429):
+        if resp.status_code in actionable:
             msg = "request rejected"
             try:
                 d = resp.json().get("detail")

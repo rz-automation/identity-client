@@ -61,7 +61,8 @@ data class Provider(
  * [AuthRejected] (the subject is not/no longer valid); any other `>= 400`, a
  * transport failure, or a non-JSON body is [IdentityUnavailable] (still denies,
  * but says nothing about the subject). The password endpoints additionally
- * surface the actionable 4xx as [PasswordRejected].
+ * surface the actionable 4xx as [PasswordRejected], and [signIn] surfaces
+ * identity's 409 email conflict the same way.
  */
 class IdentityClient(
     val config: IdentityConfig,
@@ -154,18 +155,24 @@ class IdentityClient(
      *  - `provider == "discord"`: [credential] is the single-use exchange code
      *    from the Discord return redirect.
      *
-     * Throws [IllegalArgumentException] for an unknown provider.
+     * Throws [PasswordRejected] (status 409, identity's message) when the email
+     * is held by an unverified password account, so the caller can tell the user
+     * to sign in with their password; [AuthRejected] on 401;
+     * [IdentityUnavailable] otherwise; [IllegalArgumentException] for an
+     * unknown provider.
      */
     fun signIn(provider: String, credential: String): AuthResponse = when (provider) {
-        "google" -> post(
+        "google" -> postActionable(
             "/auth/google",
             buildJsonObject { put("google_id_token", JsonPrimitive(credential)) },
             AuthResponse.serializer(),
+            SIGN_IN_ACTIONABLE,
         )
-        "discord" -> post(
+        "discord" -> postActionable(
             "/auth/discord/exchange",
             buildJsonObject { put("code", JsonPrimitive(credential)) },
             AuthResponse.serializer(),
+            SIGN_IN_ACTIONABLE,
         )
         else -> throw IllegalArgumentException("unknown provider '$provider'")
     }
@@ -175,7 +182,7 @@ class IdentityClient(
      * on an actionable 4xx (400 weak password, 409 email taken, 404 not enabled),
      * [AuthRejected] on 401, and [IdentityUnavailable] otherwise.
      */
-    fun passwordSignup(email: String, password: String): AuthResponse = postPassword(
+    fun passwordSignup(email: String, password: String): AuthResponse = postActionable(
         "/auth/password/signup",
         buildJsonObject { put("email", JsonPrimitive(email)); put("password", JsonPrimitive(password)) },
         AuthResponse.serializer(),
@@ -186,7 +193,7 @@ class IdentityClient(
      * actionable 4xx (404 not enabled, 429 rate-limited), [AuthRejected] on 401
      * (wrong/unknown, generic on purpose), and [IdentityUnavailable] otherwise.
      */
-    fun passwordLogin(email: String, password: String): AuthResponse = postPassword(
+    fun passwordLogin(email: String, password: String): AuthResponse = postActionable(
         "/auth/password/login",
         buildJsonObject { put("email", JsonPrimitive(email)); put("password", JsonPrimitive(password)) },
         AuthResponse.serializer(),
@@ -200,7 +207,7 @@ class IdentityClient(
      * [PasswordRejected] on an actionable 4xx (404 password not enabled, 429
      * rate-limited), [AuthRejected] on 401, and [IdentityUnavailable] otherwise.
      */
-    fun passwordResetRequest(email: String): ResetAck = postPassword(
+    fun passwordResetRequest(email: String): ResetAck = postActionable(
         "/auth/password/reset/request",
         buildJsonObject { put("email", JsonPrimitive(email)) },
         ResetAck.serializer(),
@@ -213,7 +220,7 @@ class IdentityClient(
      * [PasswordRejected] on 429, [AuthRejected] on 401, and
      * [IdentityUnavailable] otherwise.
      */
-    fun passwordResetValidate(token: String): ResetValidity = postPassword(
+    fun passwordResetValidate(token: String): ResetValidity = postActionable(
         "/auth/password/reset/validate",
         buildJsonObject { put("token", JsonPrimitive(token)) },
         ResetValidity.serializer(),
@@ -225,7 +232,7 @@ class IdentityClient(
      * (400 weak password or an expired/used/invalid token), [AuthRejected] on
      * 401, and [IdentityUnavailable] otherwise.
      */
-    fun passwordResetConfirm(token: String, password: String): ResetAck = postPassword(
+    fun passwordResetConfirm(token: String, password: String): ResetAck = postActionable(
         "/auth/password/reset/confirm",
         buildJsonObject { put("token", JsonPrimitive(token)); put("password", JsonPrimitive(password)) },
         ResetAck.serializer(),
@@ -365,7 +372,12 @@ class IdentityClient(
         }
     }
 
-    private fun <T> postPassword(path: String, body: JsonObject, deserializer: KSerializer<T>): T {
+    private fun <T> postActionable(
+        path: String,
+        body: JsonObject,
+        deserializer: KSerializer<T>,
+        actionable: Set<Int> = PASSWORD_ACTIONABLE,
+    ): T {
         val result = try {
             transport.post("${config.baseUrl}$path", config.authHeader, body.toString())
         } catch (e: TransportException) {
@@ -379,7 +391,7 @@ class IdentityClient(
                     throw IdentityUnavailable("identity $path returned a non-JSON body", e)
                 }
             result.status == 401 -> throw AuthRejected("identity $path rejected (401)")
-            result.status in ACTIONABLE -> throw PasswordRejected(result.status, detailError(result.body))
+            result.status in actionable -> throw PasswordRejected(result.status, detailError(result.body))
             else -> throw IdentityUnavailable("identity $path returned ${result.status}")
         }
     }
@@ -404,6 +416,7 @@ class IdentityClient(
 
     private companion object {
         val JSON = Json { ignoreUnknownKeys = true }
-        val ACTIONABLE = setOf(400, 404, 409, 429)
+        val PASSWORD_ACTIONABLE = setOf(400, 404, 409, 429)
+        val SIGN_IN_ACTIONABLE = setOf(409)
     }
 }

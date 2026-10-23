@@ -48,8 +48,8 @@ raises otherwise, for a caller that must know the token is gone.
 
 | Method | Path | Request | Response |
 |--------|------|---------|----------|
-| POST | `/auth/google` | `{ "google_id_token": str }` | `{ access_token, refresh_token, expires_at, user: { id, email, is_new } }` |
-| POST | `/auth/discord/exchange` | `{ "code": str }` | same as `/auth/google` |
+| POST | `/auth/google` | `{ "google_id_token": str }` | `{ access_token, refresh_token, expires_at, user: { id, email, is_new } }`. Errors: `409` the email is held by an unverified password account (sign in with the password instead). |
+| POST | `/auth/discord/exchange` | `{ "code": str }` | same as `/auth/google`, `409` included |
 | POST | `/auth/password/signup` | `{ "email": str, "password": str }` | same as `/auth/google`. Errors: `400` weak password, `409` email taken, `404` password not enabled. |
 | POST | `/auth/password/login` | `{ "email": str, "password": str }` | same as `/auth/google`. Errors: `401` generic (wrong/unknown), `429` rate-limited, `404` not enabled. |
 | POST | `/auth/refresh` | `{ "refresh_token": str }` | `{ access_token, expires_at }` |
@@ -62,7 +62,8 @@ raises otherwise, for a caller that must know the token is gone.
 `{code: credential}`. Both return the same body. Email+password is separate
 (two fields, not one relayed token): `password_signup(email, password)` ->
 `/auth/password/signup` and `password_login(email, password)` ->
-`/auth/password/login`. The actionable 4xx above (`400/404/409/429`) carry
+`/auth/password/login`. The actionable 4xx above (`400/404/409/429` on the
+password endpoints, `409` on `sign_in`) carry
 `{ "detail": { "error": str } }`; a client surfaces them with their status
 rather than collapsing to "unavailable".
 
